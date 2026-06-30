@@ -104,8 +104,9 @@ def require_ffmpeg() -> str:
     exe = shutil.which("ffmpeg")
     if not exe:
         raise RuntimeError(
-            "ffmpeg is not installed or not on PATH. Install it (macOS: `brew install ffmpeg`) "
-            "and restart the server."
+            "ffmpeg is not installed or not on PATH. "
+            "macOS: `brew install ffmpeg` · Windows: https://ffmpeg.org/download.html · "
+            "Linux: `apt install ffmpeg`. Then restart the server."
         )
     return exe
 

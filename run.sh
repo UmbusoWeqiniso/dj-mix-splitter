@@ -10,7 +10,7 @@ if [ ! -d .venv ]; then
 fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "WARNING: ffmpeg not found. Install it with: brew install ffmpeg"
+  echo "WARNING: ffmpeg not found. macOS: brew install ffmpeg · Windows/Linux: see README"
 fi
 
 export PYTHONUNBUFFERED=1
