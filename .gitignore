@@ -1,0 +1,20 @@
+# Secrets & local config
+.env
+*.p8
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Runtime data (downloads, stems, caches — can be many GB)
+data/
+
+# Logs & OS
+server.log
+*.log
+.DS_Store

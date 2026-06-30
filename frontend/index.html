@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mix Station — Stem Studio</title>
+  <link rel="stylesheet" href="/styles.css?v=195" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo"></span>
+        <div>
+          <h1>MIX&nbsp;STATION</h1>
+          <p class="tag">STEM STUDIO · SPLIT · LOOP · REMIX</p>
+        </div>
+      </div>
+      <div class="topbar-status">
+        <div id="resources" class="health" aria-live="polite"></div>
+        <div id="health" class="health"></div>
+        <button id="settings-open" type="button" class="settings-pill status-pill" title="Settings" aria-label="Settings">
+          <svg class="settings-pill-icon" viewBox="0 0 24 24" width="8" height="8" aria-hidden="true">
+            <path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.04-.71-1.63-.94l-.36-2.54A.484.484 0 0 0 14 2h-4c-.25 0-.46.18-.49.42l-.36 2.54c-.59.24-1.13.57-1.63.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.04.71 1.63.94l.36 2.54c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/>
+          </svg>
+          settings
+        </button>
+      </div>
+    </header>
+
+    <section id="studio" class="studio-main">
+      <div class="studio">
+        <div class="studio-head playlist-main">
+          <div class="lcd playlist-lcd grow" id="playlist-lcd">
+            <div class="lcd-row">
+              <span class="lcd-label">PLAYLIST</span>
+              <span class="lcd-row-meta">
+                <span class="lcd-row-status">
+                  <span id="playlist-busy-led" class="studio-busy-led" aria-hidden="true" title="Activity indicator"></span>
+                  <span id="playlist-load-status" class="lcd-status paused">READY</span>
+                </span>
+                <span id="playlist-count" class="muted small">0 tracks</span>
+              </span>
+            </div>
+            <div class="playlist-viewport">
+              <div id="playlist-list" class="playlist-list">
+                <div class="playlist-empty muted small">Empty — ＋ Add tracks from Library. Click a row to preview.</div>
+              </div>
+            </div>
+            <div class="playlist-waves" id="playlist-waves">
+              <div class="playlist-waves-head">
+                <span class="lcd-label">LIVE DECKS</span>
+              </div>
+              <div id="playlist-wave-lanes" class="playlist-wave-lanes">
+                <p class="playlist-waves-empty muted small">Load &amp; play a deck — drag the wave to scratch · tempo to slow / speed</p>
+              </div>
+            </div>
+            <div id="playlist-progress" class="playlist-progress studio-lcd-progress hidden">
+              <div class="dot-progress-head">
+                <div id="playlist-dot-loader" class="dot-loader" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Progress"></div>
+                <span id="playlist-progress-pct" class="seg7 dot-pct" data-mask="8%"><span class="seg7-v">0%</span></span>
+              </div>
+              <p id="playlist-msg" class="dotmatrix">Preparing…</p>
+            </div>
+          </div>
+          <div class="head-actions">
+            <div class="load-wrap">
+              <button id="studio-load" class="primary iconbtn" title="Load a mix or track" aria-label="Load">＋</button>
+              <div id="load-menu" class="load-modal hidden">
+              <div class="load-modal-inner">
+                <div class="load-modal-head">
+                  <span class="lcd-label">LOAD MUSIC</span>
+                  <button id="load-close" class="ghost iconbtn" title="Close" aria-label="Close">✕</button>
+                </div>
+                <div class="load-sources">
+                  <div class="load-sec">
+                    <span class="load-lab">LOAD FROM URL</span>
+                    <div class="load-row">
+                      <input id="url" type="url" placeholder="YouTube, SoundCloud, Spotify, Apple Music, or audio URL…" autocomplete="off" />
+                      <button id="go" class="primary iconbtn" title="Load URL" aria-label="Load URL">⏎</button>
+                    </div>
+                  </div>
+                  <div class="load-sec">
+                    <span class="load-lab">LOAD LOCAL MP3</span>
+                    <label class="file-btn">
+                      <input id="file" type="file" accept="audio/*" />
+                      <span>📂 Browse files…</span>
+                    </label>
+                  </div>
+                </div>
+                <div class="load-sec load-library">
+                  <div class="load-lab-row">
+                    <span class="load-lab">LIBRARY · ＋ ADD TO PLAYLIST</span>
+                    <span id="downloads-count" class="muted small">0 tracks</span>
+                  </div>
+                  <div id="downloads-list" class="playlist-list dl-list">
+                    <div class="playlist-empty muted small">Library empty — load a URL or MP3 above.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="studio-body" class="studio-body">
+          <div class="decks-toolbar">
+            <span class="sec-tag">DECKS</span>
+            <span id="deck-count" class="muted small deck-count">2 / 4</span>
+            <button type="button" id="add-deck" class="ghost deck-toolbar-btn" title="Add deck">+ Deck</button>
+          </div>
+          <div id="decks" class="decks" data-deck-count="2"></div>
+
+          <template id="deck-tpl">
+            <section class="deck" tabindex="0">
+              <aside class="deck-tempo-rail" aria-label="Tempo pitch">
+                <div class="deck-tempo-ctrl" title="Tempo pitch">
+                  <span class="ctrl-label deck-tempo-lab">TEMPO</span>
+                  <span class="deck-tempo-fader">
+                    <input type="range" class="deck-tempo" min="-20" max="20" step="0.5" value="0" title="Tempo pitch" />
+                  </span>
+                  <span class="deck-tempo-foot">
+                    <span class="deck-tempo-rate rate-pill" title="Current pitch">+0.0%</span>
+                    <button type="button" class="deck-tempo-reset" title="Reset tempo to +0.0%" aria-label="Reset tempo">0</button>
+                  </span>
+                  <span class="deck-sync-led" title="Beat sync"></span>
+                </div>
+              </aside>
+              <div class="deck-main">
+              <div class="sec-head deck-head-row">
+                <span class="sec-tag deck-tag">DECK <span class="deck-num"></span></span>
+                <button type="button" class="ghost iconbtn deck-remove" title="Remove deck" aria-label="Remove deck">✕</button>
+              </div>
+              <div class="deck-lcd lcd lcd-dotmatrix">
+                <div class="lcd-row">
+                  <span class="lcd-label">DECK <span class="deck-num-lcd"></span></span>
+                  <span class="lcd-row-meta">
+                    <span class="lcd-row-status">
+                      <span class="deck-busy-led studio-busy-led" aria-hidden="true" title="Activity indicator"></span>
+                      <span class="deck-play-state lcd-status paused">IDLE</span>
+                      <span class="deck-sep-pct seg7 dot-pct hidden" aria-label="Separation progress"><span class="seg7-v">0%</span></span>
+                    </span>
+                    <span class="deck-bpm lcd hidden">BPM —</span>
+                  </span>
+                </div>
+                <span class="deck-title lcd-title">No track loaded</span>
+                <span class="deck-sub lcd-sub">Load a track from the playlist (⏏)</span>
+                <span class="deck-next lcd-sub deck-next-line" title="">NEXT: —</span>
+                <div class="deck-seek hidden" aria-label="Track position">
+                  <span class="deck-time-elapsed st-time-elapsed lcd mono" aria-label="Elapsed">0:00</span>
+                  <div class="deck-seek-lane" role="slider" tabindex="0" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="0" aria-label="Seek position">
+                    <div class="deck-seek-meter" aria-hidden="true">
+                      <div class="deck-seek-track"></div>
+                      <div class="deck-seek-headline"></div>
+                    </div>
+                  </div>
+                  <span class="deck-time-remaining st-time-remaining lcd mono" aria-label="Remaining">-0:00</span>
+                </div>
+                <div class="deck-progress studio-lcd-progress hidden">
+                  <div class="dot-progress-head">
+                    <div class="deck-dot-loader dot-loader" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Progress"></div>
+                    <span class="deck-progress-pct seg7 dot-pct" data-mask="8%"><span class="seg7-v">0%</span></span>
+                  </div>
+                  <p class="deck-msg dotmatrix">Preparing…</p>
+                </div>
+              </div>
+              <p class="deck-status lcd-sub hidden" aria-live="polite"></p>
+              <div class="transport">
+                <div class="transport-pads">
+                  <div class="play-bump">
+                    <button type="button" class="st-play primary iconbtn" title="Play / pause" aria-label="Play / pause"></button>
+                  </div>
+                </div>
+                <button type="button" class="st-muteall ghost iconbtn" title="Mute all / unmute all" aria-label="Mute all"></button>
+                <button type="button" class="st-reset ghost iconbtn" title="Reset: unmute all & restore volumes" aria-label="Reset mix"></button>
+                <button type="button" class="deck-stems-toggle ghost" title="STEM / EQ controls" aria-label="STEM / EQ controls" aria-expanded="false"><span class="deck-stems-toggle-icon" aria-hidden="true">🎛</span><span class="deck-stems-toggle-lab">STEM/EQ</span></button>
+                <div class="loop-controls deck-loop-controls">
+                  <span class="ctrl-label">LOOP</span>
+                  <div class="loop-len" title="Loop length (bars)">
+                    <button type="button" class="seg" data-bars="1">1</button>
+                    <button type="button" class="seg" data-bars="2">2</button>
+                    <button type="button" class="seg on" data-bars="4">4</button>
+                    <button type="button" class="seg" data-bars="8">8</button>
+                  </div>
+                  <span class="ctrl-label">BARS</span>
+                </div>
+              </div>
+              <div class="deck-stem-drawer" aria-hidden="true">
+                <div class="deck-stem-drawer-inner">
+                  <div class="deck-stem-rack stem-rack">
+                    <div class="deck-stem-rows stem-rows waves-off">
+                      <p class="stem-rows-empty muted small">Load a track from the playlist (⏏) — separated stems appear here.</p>
+                      <div class="stem-rows-stems stem-rows-pane hidden"></div>
+                      <div class="stem-rows-eq stem-rows-pane hidden"></div>
+                    </div>
+                    <div class="stem-side-ctrls" role="toolbar" aria-label="Stem controls">
+                      <div class="stem-ctrl-slot stem-ctrl-show">
+                        <span class="mix-strip-tag stem-ctrl-lab">SHOW</span>
+                        <div class="stem-show-wrap">
+                          <button type="button" class="stem-ctrl-btn mix-tbtn stem-show-btn deck-stem-show ctrl-show hidden" title="Show / hide stems" aria-label="Show / hide stems" aria-expanded="false"><svg class="stem-show-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2v12M8 2v12M11.5 2v12" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg></button>
+                          <div class="stem-filter-pop deck-stem-filter hidden" role="dialog" aria-label="Show stems">
+                            <span class="stem-filter-lab">SHOW</span>
+                            <div class="deck-stem-filter-chips stem-filter-chips"></div>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="stem-ctrl-slot stem-ctrl-mode deck-st-mode-slot">
+                        <span class="mix-strip-tag stem-ctrl-lab deck-st-mode-lab">STEM</span>
+                        <button type="button" class="stem-ctrl-btn mix-tbtn ctrl-mode deck-st-mode-toggle on" title="Instruments — AI stem separation" aria-label="Toggle stem mode" aria-pressed="true"><span class="mode-icon mode-stems" aria-hidden="true">🎛</span><span class="mode-icon mode-simple hidden" aria-hidden="true">☰</span></button>
+                      </div>
+                      <div class="stem-ctrl-slot stem-ctrl-dl">
+                        <span class="mix-strip-tag stem-ctrl-lab">MP3</span>
+                        <button type="button" class="stem-ctrl-btn mix-tbtn ctrl-dl deck-st-download hidden" title="Download selection as MP3" aria-label="Download selection (MP3)">⬇</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              </div>
+            </section>
+          </template>
+
+          <section class="mixer-sec">
+            <div class="sec-head">
+              <span class="sec-tag mixer-tag">MIXER</span>
+              <span class="muted small mixer-tip">Tip: open <b>STEM/EQ</b> on each deck · <b>Solo</b> isolates · <b>Include</b> sets mix download.</span>
+              <div class="mixer-controls">
+                <span id="pl-sync-status" class="mixer-sync-status muted small">—</span>
+                <button type="button" id="mixer-sync" class="mix-tbtn mix-tbtn-label mixer-sync" title="Beat-sync playing decks to longest-playing deck">SYNC</button>
+              </div>
+            </div>
+            <div class="mixer-console">
+              <div id="remix-decks" class="mixer-strip-bank">
+                <div class="mix-strip">
+                  <span class="mix-strip-tag rdeck-tag fx">FX/LOOP</span>
+                  <div class="stem-fader-grow">
+                    <span class="fader-v"><input type="range" id="fxloop-vol" min="0" max="1" step="0.01" value="1" title="Loop &amp; effects bus (all decks)" /></span>
+                  </div>
+                  <button type="button" id="fxloop-mute" class="rdeck-mute ghost" title="Mute loop &amp; effects bus" aria-label="Mute FX/loop"></button>
+                </div>
+                <div id="focused-main-loop" class="mix-strip mix-cross hidden">
+                  <span class="mix-strip-tag rcross-lab"><b class="a">MAIN</b>·<b class="b">LOOP</b></span>
+                  <div class="stem-fader-grow">
+                    <span class="fader-h"><input type="range" id="rxfader" min="0" max="1" step="0.01" value="0.5" title="Crossfade MAIN ↔ LOOP" /></span>
+                  </div>
+                  <span class="mix-strip-pad" aria-hidden="true"></span>
+                </div>
+                <div class="mix-strip">
+                  <span class="mix-strip-tag rdeck-tag master">MASTER</span>
+                  <div class="stem-fader-grow">
+                    <span class="fader-v"><input type="range" id="master-vol" min="0" max="1" step="0.01" value="1" title="Master output level" /></span>
+                  </div>
+                  <button type="button" id="master-mute" class="rdeck-mute ghost" title="Mute master output" aria-label="Mute master"></button>
+                </div>
+                <div id="deck-mixer-strips" class="deck-mixer-strips"></div>
+              </div>
+            </div>
+          </section>
+
+        </div>
+
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span>Local tool · for personal use. Respect copyright and each platform's terms.</span>
+    </footer>
+  </div>
+
+  <div id="edit-studio" class="edit-modal hidden">
+    <div class="edit-modal-inner">
+      <div class="edit-chassis">
+        <div class="edit-bar load-modal-head">
+          <span class="lcd-label">EDIT MIX SPLITS</span>
+          <div class="edit-bar-actions">
+            <button id="edit-save" class="primary iconbtn" title="Save splits to library" aria-label="Save splits">💾</button>
+            <button id="edit-close" class="ghost iconbtn" title="Close" aria-label="Close">✕</button>
+          </div>
+        </div>
+
+        <div class="edit-head-row">
+          <div class="lcd grow">
+            <div class="lcd-row">
+              <span class="lcd-label">MIX INFO</span>
+              <span id="edit-status" class="lcd-status paused">READY</span>
+            </div>
+            <span id="edit-mix-title" class="lcd-title">Mix</span>
+            <span id="edit-mix-meta" class="lcd-sub"></span>
+          </div>
+        </div>
+
+        <section class="edit-module edit-scope">
+          <div class="sec-head edit-scope-head">
+            <span class="sec-tag deck-tag">SCOPE</span>
+            <span id="edit-view-range" class="lcd edit-view-lcd hidden"></span>
+            <div class="edit-zoom">
+              <button id="edit-zoom-out" class="ghost iconbtn" title="Zoom out" aria-label="Zoom out">−</button>
+              <button id="edit-zoom-in" class="ghost iconbtn" title="Zoom in" aria-label="Zoom in">+</button>
+              <button id="edit-zoom-fit" class="ghost iconbtn" title="Show full mix" aria-label="Show full mix">⤢</button>
+            </div>
+            <span class="ctrl-label">TAP WAVE TO SEEK · DRAG TABS TO NUDGE · +/− ZOOM · SHIFT+DRAG PAN</span>
+          </div>
+          <div class="device-screen edit-wave-screen">
+            <div class="edit-wave-stack">
+              <div class="wave-wrap" id="edit-wave-wrap">
+                <canvas id="edit-wave" height="160"></canvas>
+                <div id="edit-regions" class="edit-regions"></div>
+                <div id="edit-boundaries" class="edit-boundaries"></div>
+                <div id="edit-playhead" class="playhead"></div>
+              </div>
+              <div id="edit-grip-rail" class="edit-grip-rail">
+                <div id="edit-grips" class="edit-grips"></div>
+              </div>
+            </div>
+          </div>
+          <div class="edit-controls loop-station">
+            <div class="transport-pads">
+              <button id="edit-skip-back" class="ghost iconbtn" title="Skip back 10 sec" aria-label="Skip back">⏪</button>
+              <button id="edit-play" class="primary iconbtn" title="Play / pause" aria-label="Play / pause">▶</button>
+              <button id="edit-skip-fwd" class="ghost iconbtn" title="Skip forward 10 sec" aria-label="Skip forward">⏩</button>
+            </div>
+            <button id="edit-split" class="ghost iconbtn" title="Split at playhead" aria-label="Split at playhead">✂</button>
+            <span id="edit-time" class="lcd mono">00:00 / 00:00</span>
+            <span class="edit-ctrl-sep" aria-hidden="true"></span>
+            <span class="ctrl-label">SENS</span>
+            <input id="edit-sensitivity" type="range" min="1" max="10" step="0.5" value="5" />
+            <span id="edit-sens-val" class="lcd edit-sens-lcd">5</span>
+            <button id="edit-redetect" class="ghost iconbtn" title="Re-split mix" aria-label="Re-split mix">↻</button>
+            <span id="edit-redetect-status" class="muted small edit-redetect-status"></span>
+          </div>
+          <div id="edit-progress" class="edit-progress hidden">
+            <div class="bar"><div id="edit-bar" class="bar-fill"></div></div>
+            <p id="edit-progress-msg" class="muted small">Working…</p>
+          </div>
+        </section>
+
+        <section class="edit-module edit-tracks-sec">
+          <div class="device-screen">
+            <div class="playlist-head">
+              <span class="lcd-label">TRACK LIST</span>
+              <span id="edit-tracks-count" class="muted small">0 tracks</span>
+            </div>
+            <div class="edit-track-screen" id="edit-track-screen">
+              <div class="edit-track-hdr">
+                <span class="c-no">#</span>
+                <span class="c-time">Start</span>
+                <span class="c-len">Len</span>
+                <span class="c-title">Title</span>
+                <span class="c-artist">Artist</span>
+                <span class="c-pads"></span>
+              </div>
+              <div id="edit-track-rows" class="edit-track-body"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+      <audio id="edit-audio" preload="metadata"></audio>
+    </div>
+  </div>
+
+  <div id="settings-panel" class="load-modal hidden">
+    <div class="load-modal-inner settings-inner">
+      <div class="load-modal-head">
+        <span class="lcd-label">SETTINGS</span>
+        <button id="settings-close" type="button" class="ghost iconbtn" title="Close" aria-label="Close">✕</button>
+      </div>
+
+      <section class="settings-sec">
+        <h3 class="settings-sec-title">Stem separation</h3>
+        <p class="muted small settings-sec-note">Quality vs speed for AI stem jobs (Demucs). Saved for all tracks until you change it.</p>
+        <div class="settings-quality quality-mode" title="Separation quality vs speed">
+          <button type="button" class="seg" data-quality="vocal" title="Vocal — 2 stems: vocals + instrumental (fastest)" aria-label="Vocal/instrumental quality">🎤</button>
+          <button type="button" class="seg" data-quality="fast" title="Fast — 5 stems (~1 min)" aria-label="Fast quality">⚡</button>
+          <button type="button" class="seg on" data-quality="balanced" title="Balanced — 8 stems (~2-3 min)" aria-label="Balanced quality">⚖</button>
+          <button type="button" class="seg" data-quality="high" title="High — 8 stems (~4-8 min)" aria-label="High quality">💎</button>
+        </div>
+        <p id="settings-quality-note" class="muted small settings-quality-note"></p>
+      </section>
+
+      <section class="settings-sec">
+        <h3 class="settings-sec-title">Mix split sensitivity</h3>
+        <p class="muted small settings-sec-note">Default for re-detect in Edit Mix Splits when a mix has no saved value.</p>
+        <div class="settings-sens-row">
+          <input id="settings-sensitivity" type="range" min="1" max="10" step="0.5" value="5" aria-label="Default split sensitivity" />
+          <span id="settings-sens-val" class="lcd mono">5</span>
+        </div>
+      </section>
+
+      <section class="settings-sec">
+        <h3 class="settings-sec-title">Storage</h3>
+        <p class="muted small settings-sec-note">Disk used by downloaded mixes, AI stems, and cached preview clips. Source audio is kept; stems and preview caches can be reclaimed.</p>
+        <div id="storage-summary" class="storage-summary muted small">Loading…</div>
+        <div id="storage-breakdown" class="storage-breakdown"></div>
+        <div id="storage-mixes" class="storage-mixes"></div>
+        <div class="storage-actions">
+          <button id="storage-cleanup-regions" type="button" class="ghost">Remove cached preview clips</button>
+        </div>
+      </section>
+
+      <section class="settings-sec">
+        <h3 class="settings-sec-title">Services</h3>
+        <p class="muted small settings-sec-note">Load &amp; split from free URL sources (YouTube, SoundCloud, Bandcamp). Connect Spotify or Apple Music for catalog playback — stem/split still needs a downloadable mix or local file.</p>
+        <div id="services-list" class="services-list"></div>
+      </section>
+    </div>
+  </div>
+
+  <script src="/spotify.js?v=1"></script>
+  <script src="/settings.js?v=4"></script>
+  <script src="/apple-music.js?v=4"></script>
+  <script src="/app.js?v=61"></script>
+  <script src="/stems.js?v=102"></script>
+  <script src="/edit.js?v=23"></script>
+</body>
+</html>
