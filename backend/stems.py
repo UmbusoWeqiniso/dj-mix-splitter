@@ -45,8 +45,8 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 #   2. cap the BLAS/torch thread pool so a single job can't saturate every core.
 # Both are derived from the machine's core count and overridable via env vars.
 _CPU_COUNT = os.cpu_count() or 4
-# Leave headroom for the OS/UI: use at most half the cores per job, min 1.
-_THREAD_CAP = _env_int("STEM_TORCH_THREADS", max(1, _CPU_COUNT // 2))
+# Leave headroom for the OS/UI: cap BLAS/torch threads so one job can't pin every core.
+_THREAD_CAP = _env_int("STEM_TORCH_THREADS", max(1, _CPU_COUNT // 4))
 STEM_MAX_CONCURRENCY = _env_int("STEM_MAX_CONCURRENCY", 1)
 
 # These must be set before torch/numpy spin up their thread pools.
@@ -60,9 +60,9 @@ _threads_configured = False
 
 # Memory discipline: retain finished jobs only briefly, cap the registry, and
 # unload the (large) model once the app has been idle so it runs silently at rest.
-STEM_JOB_TTL = _env_int("STEM_JOB_TTL", 1800)        # drop finished jobs after 30 min
-STEM_JOB_MAX = _env_int("STEM_JOB_MAX", 64)          # hard cap on retained jobs
-STEM_MODEL_IDLE = _env_int("STEM_MODEL_IDLE", 300)   # unload model after 5 min idle
+STEM_JOB_TTL = _env_int("STEM_JOB_TTL", 300)         # drop finished jobs after 5 min
+STEM_JOB_MAX = _env_int("STEM_JOB_MAX", 16)          # hard cap on retained jobs
+STEM_MODEL_IDLE = _env_int("STEM_MODEL_IDLE", 60)    # unload model after 1 min idle
 _last_used = 0.0
 
 
@@ -497,17 +497,25 @@ class StemManager:
                 traceback.print_exc()
 
     def create(self, src_wav: Path, parent_dir: Path, track_index: int,
-               start: float, end: float, title: str, quality: str = DEFAULT_QUALITY) -> StemJob:
+               start: float, end: float, title: str, quality: str = DEFAULT_QUALITY,
+               dir_name: Optional[str] = None) -> StemJob:
+        """`dir_name` pins the output folder to an exact name (used by the stem
+        punch/stitch editor so regions never collide with per-track deck stems)."""
         expected = _expected_stems(quality)
-        out_dir = parent_dir / "stems" / f"t{track_index}_{int(start)}_{int(end)}_{quality}"
+        if dir_name:
+            out_dir = parent_dir / "stems" / dir_name
+            candidates = [out_dir]
+        else:
+            out_dir = parent_dir / "stems" / f"t{track_index}_{int(start)}_{int(end)}_{quality}"
+            candidates = _stem_dir_candidates(parent_dir, track_index, start, end, quality)
         cached = None
-        for cand in _stem_dir_candidates(parent_dir, track_index, start, end, quality):
+        for cand in candidates:
             cached = _load_cached_stems(cand, expected)
             if cached:
                 out_dir = cand
                 break
 
-        key = self._key(parent_dir, track_index, start, end, quality)
+        key = f"{parent_dir}|{dir_name}" if dir_name else self._key(parent_dir, track_index, start, end, quality)
         sid = uuid.uuid4().hex[:12]
         job = StemJob(sid, track_index, title, out_dir)
 
@@ -567,9 +575,14 @@ class StemManager:
                     job.update(status="error", error=str(exc), message=f"Separation failed: {exc}")
                 finally:
                     stop.set()
+                    queue_empty = False
                     with self._lock:
                         if self._inflight.get(key) == sid:
                             del self._inflight[key]
+                        queue_empty = len(self._inflight) == 0
+                    if queue_empty:
+                        unload_model()
+                    self._evict_jobs()
 
         threading.Thread(target=run, daemon=True).start()
         return job

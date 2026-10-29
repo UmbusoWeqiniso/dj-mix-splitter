@@ -12,12 +12,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from config import DATA_DIR, get_acrcloud_config, get_apple_music_config, get_spotify_config, require_ffmpeg
+from identify import check_acrcloud_status
 from jobs import manager
 from stems import STEM_ORDER, stem_manager
 from transcribe import transcribe_manager
 from apple_music import catalog_search, catalog_song, developer_token, status as apple_music_status
 import spotify as spotify_svc
 from services import list_services, services_summary
+from stitch import apply_edit, edit_state, export_to_mp3, revert_all, stitch_dir_name, write_preview
 from storage import cleanup_regions, clear_stems, storage_summary
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,6 +89,14 @@ class MixRequest(BaseModel):
     artist: str = ""
 
 
+class StitchRequest(BaseModel):
+    start: float
+    end: float
+    quality: str = "balanced"
+    muted: list[str] = []
+    crossfade_ms: float = 25.0
+
+
 class StorageClearStems(BaseModel):
     job_id: str
 
@@ -101,10 +111,14 @@ def health() -> dict:
     except RuntimeError as exc:
         ffmpeg_ok = False
         ffmpeg_msg = str(exc)
+    acr_status = check_acrcloud_status(cfg)
     return {
         "ffmpeg": ffmpeg_ok,
         "ffmpeg_message": ffmpeg_msg,
         "acrcloud_configured": cfg.configured,
+        "acrcloud_status": acr_status.get("status", "unknown"),
+        "acrcloud_code": acr_status.get("code"),
+        "acrcloud_message": acr_status.get("message", ""),
         "apple_music_configured": get_apple_music_config().configured,
         "spotify_configured": get_spotify_config().configured,
         "spotify_connected": spotify_svc.connected() if get_spotify_config().configured else False,
@@ -263,32 +277,48 @@ def adopt_job(body: dict) -> dict:
     return job.snapshot()
 
 
-@app.get("/api/jobs/{job_id}")
-def get_job(job_id: str) -> dict:
+def _get_job(job_id: str) -> Job:
     job = manager.get(job_id)
     if not job:
+        try:
+            job = manager.adopt(job_id)
+        except Exception:
+            pass
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job.snapshot()
+    return job
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> dict:
+    return _get_job(job_id).snapshot()
 
 
 @app.post("/api/jobs/{job_id}/redetect")
 def redetect_job(job_id: str, body: RedetectRequest) -> dict:
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     if job.status in ("running", "exporting"):
         raise HTTPException(status_code=409, detail="Job is busy.")
-    if not job.novelty_full:
-        raise HTTPException(status_code=409, detail="Analysis not finished yet.")
+    try:
+        manager.ensure_novelty(job)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     manager.redetect(job, body.sensitivity)
+    return job.snapshot()
+
+
+@app.post("/api/jobs/{job_id}/reidentify")
+def reidentify_job(job_id: str) -> dict:
+    job = _get_job(job_id)
+    if job.status in ("running", "exporting"):
+        raise HTTPException(status_code=409, detail="Job is busy.")
+    manager.reidentify(job)
     return job.snapshot()
 
 
 @app.post("/api/jobs/{job_id}/tracks")
 def update_tracks(job_id: str, body: TracksUpdateRequest) -> dict:
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     if job.status in ("running", "exporting"):
         raise HTTPException(status_code=409, detail="Job is busy.")
     if not body.tracks:
@@ -302,9 +332,7 @@ def update_tracks(job_id: str, body: TracksUpdateRequest) -> dict:
 
 @app.delete("/api/jobs/{job_id}/tracks/{track_index}")
 def delete_track(job_id: str, track_index: int) -> dict:
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     if job.status in ("running", "exporting"):
         raise HTTPException(status_code=409, detail="Job is busy.")
     try:
@@ -316,11 +344,20 @@ def delete_track(job_id: str, track_index: int) -> dict:
     return job.snapshot()
 
 
-@app.get("/api/jobs/{job_id}/audio")
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str) -> dict:
+    if ".." in job_id or "/" in job_id or "\\" in job_id:
+        raise HTTPException(status_code=400, detail="Invalid job id.")
+    try:
+        manager.delete_job(job_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "id": job_id}
+
+
+@app.api_route("/api/jobs/{job_id}/audio", methods=["GET", "HEAD"])
 def get_audio(job_id: str):
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     src = job.dir / "source.wav"
     if not src.exists():
         raise HTTPException(status_code=404, detail="Audio not ready")
@@ -329,9 +366,7 @@ def get_audio(job_id: str):
 
 @app.post("/api/jobs/{job_id}/export")
 def export_job(job_id: str, body: ExportRequest) -> dict:
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     if not body.tracks:
         raise HTTPException(status_code=400, detail="No tracks selected for export.")
     if job.status in ("running", "exporting"):
@@ -343,9 +378,7 @@ def export_job(job_id: str, body: ExportRequest) -> dict:
 
 @app.post("/api/jobs/{job_id}/track")
 def export_single_track(job_id: str, body: SingleTrack) -> dict:
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     try:
         info = manager.export_single(job, body.model_dump(), body.index)
     except Exception as exc:  # noqa: BLE001
@@ -373,24 +406,19 @@ def storage_cleanup_regions() -> dict:
     return cleanup_regions()
 
 
-@app.get("/api/jobs/{job_id}/region")
-def get_region(job_id: str, start: float, end: float, background_tasks: BackgroundTasks):
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+@app.api_route("/api/jobs/{job_id}/region", methods=["GET", "HEAD"])
+def get_region(job_id: str, start: float, end: float):
+    job = _get_job(job_id)
     try:
         path = manager.region_wav(job, start, end)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
-    background_tasks.add_task(lambda p=path: p.unlink(missing_ok=True))
     return FileResponse(path, media_type="audio/wav")
 
 
 @app.post("/api/jobs/{job_id}/bpm")
 def track_bpm(job_id: str, body: BpmRequest) -> dict:
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     try:
         return manager.track_bpm(job, body.start, body.end)
     except Exception as exc:  # noqa: BLE001
@@ -399,9 +427,7 @@ def track_bpm(job_id: str, body: BpmRequest) -> dict:
 
 @app.post("/api/jobs/{job_id}/stems")
 def create_stems(job_id: str, body: StemRequest) -> dict:
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     src = job.dir / "source.wav"
     if not src.exists():
         raise HTTPException(status_code=404, detail="Source audio not available")
@@ -417,7 +443,7 @@ def get_stems(stem_id: str) -> dict:
     return sjob.snapshot()
 
 
-@app.get("/api/stems/{stem_id}/audio/{stem}")
+@app.api_route("/api/stems/{stem_id}/audio/{stem}", methods=["GET", "HEAD"])
 def get_stem_audio(stem_id: str, stem: str):
     sjob = stem_manager.get(stem_id)
     if not sjob or stem not in sjob.stems:
@@ -469,7 +495,7 @@ def get_transcript(stem_id: str) -> dict:
     return tjob.snapshot()
 
 
-@app.get("/api/stems/{stem_id}/download/{filename}")
+@app.api_route("/api/stems/{stem_id}/download/{filename}", methods=["GET", "HEAD"])
 def download_stem_mix(stem_id: str, filename: str):
     sjob = stem_manager.get(stem_id)
     if not sjob:
@@ -482,10 +508,10 @@ def download_stem_mix(stem_id: str, filename: str):
     return FileResponse(path, media_type="audio/mpeg", filename=filename)
 
 
-@app.get("/api/jobs/{job_id}/download")
+@app.api_route("/api/jobs/{job_id}/download", methods=["GET", "HEAD"])
 def download_zip(job_id: str):
-    job = manager.get(job_id)
-    if not job or not job.export.get("zip"):
+    job = _get_job(job_id)
+    if not job.export.get("zip"):
         raise HTTPException(status_code=404, detail="Nothing to download yet")
     path = job.dir / "tracks" / job.export["zip"]
     if not path.exists():
@@ -494,17 +520,108 @@ def download_zip(job_id: str):
     return FileResponse(path, media_type="application/zip", filename=f"{title}.zip")
 
 
-@app.get("/api/jobs/{job_id}/download/{filename}")
+@app.api_route("/api/jobs/{job_id}/download/{filename}", methods=["GET", "HEAD"])
 def download_track(job_id: str, filename: str):
-    job = manager.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job(job_id)
     if "/" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
     path = job.dir / "tracks" / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path, media_type="audio/mpeg", filename=filename)
+
+
+def _punch_stem_job(job, start: float, end: float, quality: str):
+    src = job.dir / "source.wav"
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="Source audio not available")
+    if end - start < 0.1:
+        raise HTTPException(status_code=400, detail="OUT must be at least 0.1s after IN.")
+    return stem_manager.create(
+        src_wav=src, parent_dir=job.dir, track_index=0, start=start, end=end,
+        title="Stem punch", quality=quality or "balanced",
+        dir_name=stitch_dir_name(start, end, quality or "balanced"),
+    )
+
+
+def _muted_files(sjob, muted: list[str]) -> list[str]:
+    return [sjob.stems[s] for s in muted if s in sjob.stems]
+
+
+@app.get("/api/jobs/{job_id}/stitch")
+def stitch_state(job_id: str) -> dict:
+    return edit_state(_get_job(job_id))
+
+
+@app.post("/api/jobs/{job_id}/stitch/separate")
+def stitch_separate(job_id: str, body: StitchRequest) -> dict:
+    job = _get_job(job_id)
+    return _punch_stem_job(job, body.start, body.end, body.quality).snapshot()
+
+
+def _ready_punch(job, body: StitchRequest):
+    sjob = _punch_stem_job(job, body.start, body.end, body.quality)
+    if sjob.status != "ready":
+        raise HTTPException(status_code=409, detail="Stems for this exact range are not ready — separate first.")
+    return sjob
+
+
+@app.post("/api/jobs/{job_id}/stitch/preview")
+def stitch_preview(job_id: str, body: StitchRequest) -> dict:
+    job = _get_job(job_id)
+    sjob = _ready_punch(job, body)
+    try:
+        info = write_preview(job, sjob.dir, _muted_files(sjob, body.muted),
+                             body.start, body.end, body.crossfade_ms)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    import time
+    info["url"] = f"/api/jobs/{job_id}/stitched-preview?t={int(time.time() * 1000)}"
+    return info
+
+
+@app.post("/api/jobs/{job_id}/stitch/apply")
+def stitch_apply(job_id: str, body: StitchRequest) -> dict:
+    job = _get_job(job_id)
+    if not body.muted:
+        raise HTTPException(status_code=400, detail="Mute at least one stem first.")
+    sjob = _ready_punch(job, body)
+    try:
+        return apply_edit(job, sjob.dir, _muted_files(sjob, body.muted), body.muted,
+                          body.start, body.end, body.crossfade_ms)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.api_route("/api/jobs/{job_id}/stitched-preview", methods=["GET", "HEAD"])
+def get_stitched_preview(job_id: str):
+    prev = _get_job(job_id).dir / "stitched_preview.wav"
+    if not prev.exists():
+        raise HTTPException(status_code=404, detail="Preview not found.")
+    return FileResponse(prev, media_type="audio/wav")
+
+
+@app.post("/api/jobs/{job_id}/stitch/revert")
+def stitch_revert(job_id: str) -> dict:
+    try:
+        return revert_all(_get_job(job_id))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.api_route("/api/jobs/{job_id}/download-stitched", methods=["GET", "HEAD"])
+def download_stitched(job_id: str):
+    job = _get_job(job_id)
+    src = job.dir / "source.wav"
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="Audio file not found.")
+    dst = job.dir / "stitched_export.mp3"
+    title = (job.source.get("title") or "song") + " (Edit)"
+    try:
+        export_to_mp3(src, dst, title=title, artist=job.source.get("uploader") or "")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"MP3 export failed: {exc}")
+    return FileResponse(dst, media_type="audio/mpeg", filename=f"{title.replace('/', '_')}.mp3")
 
 
 @app.get("/")

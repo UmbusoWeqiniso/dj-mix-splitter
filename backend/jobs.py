@@ -14,11 +14,14 @@ from typing import Dict, List, Optional
 
 CACHE_VERSION = 1
 
+from dotenv import load_dotenv
+
 from analysis import analyze, estimate_bpm, segment_from_novelty
-from config import DATA_DIR, get_acrcloud_config, require_ffmpeg
+from config import DATA_DIR, ROOT, get_acrcloud_config, require_ffmpeg
 from download import download_audio
 from export import export_one, export_tracks
 from identify import identify_segments
+from metadata_fallback import match_segment_to_metadata, split_artist_title
 
 
 @dataclass
@@ -63,6 +66,31 @@ class Job:
             }
 
 
+def normalize_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+    try:
+        from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+        parsed = urlparse(url)
+        if not parsed.netloc:
+            return url
+        # Handle youtu.be / youtube.com video ID
+        if "youtu.be" in parsed.netloc:
+            video_id = parsed.path.strip("/")
+            return f"https://www.youtube.com/watch?v={video_id}"
+        if "youtube.com" in parsed.netloc:
+            qs = parse_qs(parsed.query)
+            if "v" in qs:
+                video_id = qs["v"][0]
+                return f"https://www.youtube.com/watch?v={video_id}"
+        clean_path = parsed.path.rstrip("/")
+        clean_query = urlencode(sorted([(k, v) for k, vs in parse_qs(parsed.query).items() if k not in ("t", "si", "feature", "fbclid", "utm_source", "utm_medium", "utm_campaign") for v in vs]))
+        return urlunparse((parsed.scheme, parsed.netloc.lower(), clean_path, "", clean_query, ""))
+    except Exception:
+        return url.rstrip("/")
+
+
 class JobManager:
     def __init__(self) -> None:
         self._jobs: Dict[str, Job] = {}
@@ -92,9 +120,21 @@ class JobManager:
         return job
 
     def create_from_file(self, src_path: Path, title: str = "") -> Job:
-        """Import a local audio file: transcode to source.wav, then analyze."""
+        """Import a local audio file: check for cached duplicates, otherwise transcode and analyze."""
+        file_title = title or src_path.stem
+        cached_id = self._find_cached_by_file(file_title)
+        if cached_id:
+            try:
+                src_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            existing = self.get(cached_id)
+            if existing and existing.status in ("ready", "done"):
+                return existing
+            return self.adopt(cached_id)
+
         job_id = uuid.uuid4().hex[:12]
-        job = Job(id=job_id, url=f"file:{title or src_path.name}")
+        job = Job(id=job_id, url=f"file:{file_title}")
         job.dir.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._jobs[job_id] = job
@@ -109,7 +149,14 @@ class JobManager:
                      "-ac", "2", "-ar", "44100", str(dst)],
                     check=True,
                 )
-                job.update(source={"title": title or src_path.stem, "uploader": "", "webpage_url": ""})
+                artist, clean_title = split_artist_title(file_title)
+                job.update(source={
+                    "title": file_title,
+                    "clean_title": clean_title or file_title,
+                    "artist": artist,
+                    "uploader": "",
+                    "webpage_url": "",
+                })
                 self._analyze_and_identify(job, dst)
             except Exception as exc:  # noqa: BLE001
                 traceback.print_exc()
@@ -161,12 +208,30 @@ class JobManager:
             return None
         if not DATA_DIR.exists():
             return None
+        norm_target = normalize_url(url)
         for d in DATA_DIR.iterdir():
             if not d.is_dir():
                 continue
             data = self._load_cache(d)
-            if data and data.get("url", "").strip() == url and (d / "source.wav").exists():
-                return d.name
+            if data and (d / "source.wav").exists():
+                cached_url = data.get("url", "").strip()
+                if cached_url == url or (norm_target and normalize_url(cached_url) == norm_target):
+                    return d.name
+        return None
+
+    def _find_cached_by_file(self, filename: str) -> Optional[str]:
+        if not filename or not DATA_DIR.exists():
+            return None
+        name = filename.strip().lower()
+        for d in DATA_DIR.iterdir():
+            if not d.is_dir():
+                continue
+            data = self._load_cache(d)
+            if data and (d / "source.wav").exists():
+                cached_url = data.get("url", "").strip().lower()
+                cached_title = (data.get("source") or {}).get("title", "").strip().lower()
+                if cached_url == f"file:{name}" or cached_title == name:
+                    return d.name
         return None
 
     def list_cached(self) -> list:
@@ -229,7 +294,6 @@ class JobManager:
         if cached:
             # instant: no analysis, no identification, no network
             job.url = cached.get("url") or job.url
-            job.novelty_full = cached.get("novelty_full") or []
             job.resolution = cached.get("resolution") or 0.0
             job.update(
                 source=cached.get("source") or {"title": f"Imported mix ({source_id})"},
@@ -269,6 +333,10 @@ class JobManager:
                     "duration": info["duration"],
                     "uploader": info["uploader"],
                     "webpage_url": info["webpage_url"],
+                    "description": info.get("description", ""),
+                    "chapters": info.get("chapters", []),
+                    "artist": info.get("artist", ""),
+                    "track": info.get("track", ""),
                 },
             )
 
@@ -291,6 +359,16 @@ class JobManager:
         cfg = get_acrcloud_config()
         tracks = self._identify_to_tracks(job, src, analysis["segments"], cfg)
 
+        has_quota_err = any(
+            t.get("id_status") == "error" and ("limit exceeded" in (t.get("id_message") or "").lower())
+            for t in tracks
+        )
+        matched_n = sum(1 for t in tracks if t.get("id_status") in ("matched", "fallback_chapter", "fallback_tracklist", "fallback_source_title", "fallback_source_meta"))
+        if has_quota_err:
+            fin_msg = f"Found {len(tracks)} tracks ({matched_n} labelled). Note: ACRCloud quota exceeded — see status bar."
+        else:
+            fin_msg = f"Found {len(tracks)} tracks ({matched_n} labelled). Review and export."
+
         job.update(
             result={
                 "duration": analysis["duration"],
@@ -303,9 +381,22 @@ class JobManager:
             status="ready",
             stage="ready",
             progress=1.0,
-            message=f"Found {len(tracks)} tracks. Review and export.",
+            message=fin_msg,
         )
         self._save_cache(job)
+        job.novelty_full = []
+
+    def ensure_novelty(self, job: Job) -> None:
+        """Load cached novelty curve on demand (keeps RAM low at rest)."""
+        if job.novelty_full:
+            return
+        cached = self._load_cache(job.dir)
+        if not cached:
+            raise RuntimeError("Analysis data not available for re-detection.")
+        job.novelty_full = cached.get("novelty_full") or []
+        job.resolution = cached.get("resolution") or job.resolution
+        if not job.novelty_full:
+            raise RuntimeError("Analysis data not available for re-detection.")
 
     def _identify_to_tracks(self, job: Job, src: Path, segments: List[Dict], cfg) -> List[Dict]:
         def id_progress(frac, msg):
@@ -313,10 +404,26 @@ class JobManager:
 
         ids = identify_segments(cfg, src, segments, on_progress=id_progress)
         tracks: List[Dict] = []
+        total_dur = (job.result or {}).get("duration") or 0.0
+        seg_count = len(segments)
+
         for seg, ident in zip(segments, ids):
             status = ident.get("status")
             title = ident.get("title") if status == "matched" else ""
             artist = ident.get("artist") if status == "matched" else ""
+            id_msg = ident.get("message", "")
+
+            # If ACRCloud did not find a match or errored (e.g. quota limit exceeded)
+            if not title:
+                fb_title, fb_artist, fb_method = match_segment_to_metadata(
+                    seg, total_dur, job.source or {}, seg_count
+                )
+                if fb_title:
+                    title = fb_title
+                    artist = fb_artist
+                    status = f"fallback_{fb_method}"
+                    id_msg = f"Detected from {fb_method}"
+
             tracks.append({
                 "index": seg["index"],
                 "start": seg["start"],
@@ -324,7 +431,7 @@ class JobManager:
                 "title": title or f"Track {seg['index']:02d}",
                 "artist": artist or "",
                 "id_status": status,
-                "id_message": ident.get("message", ""),
+                "id_message": id_msg,
                 "score": ident.get("score"),
             })
         return tracks
@@ -333,8 +440,7 @@ class JobManager:
         """Re-split using the cached novelty curve and a new sensitivity. Fast."""
         def run():
             try:
-                if not job.novelty_full:
-                    raise RuntimeError("Analysis data not available for re-detection.")
+                self.ensure_novelty(job)
                 job.update(status="running", stage="identify", progress=0.0, message="Re-splitting…")
                 src = job.dir / "source.wav"
                 segments = segment_from_novelty(
@@ -345,17 +451,74 @@ class JobManager:
                 new_result = dict(job.result)
                 new_result["tracks"] = tracks
                 new_result["sensitivity"] = sensitivity
+
+                has_quota_err = any(
+                    t.get("id_status") == "error" and ("limit exceeded" in (t.get("id_message") or "").lower())
+                    for t in tracks
+                )
+                matched_n = sum(1 for t in tracks if t.get("id_status") in ("matched", "fallback_chapter", "fallback_tracklist", "fallback_source_title", "fallback_source_meta"))
+                if has_quota_err:
+                    fin_msg = f"Found {len(tracks)} tracks ({matched_n} labelled). Note: ACRCloud quota exceeded."
+                else:
+                    fin_msg = f"Found {len(tracks)} tracks ({matched_n} labelled). Review and export."
+
                 job.update(
                     result=new_result,
                     status="ready",
                     stage="ready",
                     progress=1.0,
-                    message=f"Found {len(tracks)} tracks. Review and export.",
+                    message=fin_msg,
+                )
+                self._save_cache(job)
+                job.novelty_full = []
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc()
+                job.update(status="error", error=str(exc), message=f"Re-detect failed: {exc}")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def reidentify(self, job: Job) -> None:
+        """Re-run track identification using latest credentials and audio clips."""
+        def run():
+            try:
+                job.update(status="running", stage="identify", progress=0.0, message="Re-identifying tracks…")
+                src = job.dir / "source.wav"
+                if not src.exists():
+                    raise RuntimeError("Audio file source.wav not found.")
+
+                load_dotenv(ROOT / ".env", override=True)
+                cfg = get_acrcloud_config()
+
+                current_tracks = (job.result or {}).get("tracks") or []
+                segments = [{"index": t["index"], "start": t["start"], "end": t["end"]} for t in current_tracks]
+
+                tracks = self._identify_to_tracks(job, src, segments, cfg)
+
+                new_result = dict(job.result)
+                new_result["tracks"] = tracks
+                new_result["acrcloud_configured"] = cfg.configured
+
+                has_quota_err = any(
+                    t.get("id_status") == "error" and ("limit exceeded" in (t.get("id_message") or "").lower())
+                    for t in tracks
+                )
+                matched_n = sum(1 for t in tracks if t.get("id_status") in ("matched", "fallback_chapter", "fallback_tracklist", "fallback_source_title", "fallback_source_meta"))
+                if has_quota_err:
+                    fin_msg = f"Re-identified {len(tracks)} tracks ({matched_n} labelled). Note: ACRCloud quota exceeded."
+                else:
+                    fin_msg = f"Re-identified {len(tracks)} tracks ({matched_n} labelled)."
+
+                job.update(
+                    result=new_result,
+                    status="ready",
+                    stage="ready",
+                    progress=1.0,
+                    message=fin_msg,
                 )
                 self._save_cache(job)
             except Exception as exc:  # noqa: BLE001
                 traceback.print_exc()
-                job.update(status="error", error=str(exc), message=f"Re-detect failed: {exc}")
+                job.update(status="error", error=str(exc), message=f"Re-identify failed: {exc}")
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -429,6 +592,17 @@ class JobManager:
         _cleanup_orphaned_regions(job.dir, cleaned)
         self._save_cache(job)
 
+    def delete_job(self, job_id: str) -> None:
+        """Completely delete a mix/job from memory and disk."""
+        if ".." in job_id or "/" in job_id or "\\" in job_id:
+            raise ValueError("Invalid job id.")
+        with self._lock:
+            if job_id in self._jobs:
+                del self._jobs[job_id]
+        job_dir = DATA_DIR / job_id
+        if job_dir.exists() and job_dir.is_dir():
+            shutil.rmtree(job_dir, ignore_errors=True)
+
     def region_wav(self, job: Job, start: float, end: float) -> Path:
         """Cut [start, end] from source into a temp WAV for browser preview."""
         src = job.dir / "source.wav"
@@ -437,6 +611,8 @@ class JobManager:
         tmp_dir = job.dir / ".tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         dst = tmp_dir / f"{region_key(start, end)}.wav"
+        if dst.exists() and dst.stat().st_size > 0:
+            return dst
         ffmpeg = require_ffmpeg()
         duration = max(0.1, float(end) - float(start))
         cmd = [
