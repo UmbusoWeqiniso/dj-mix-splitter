@@ -64,6 +64,7 @@
       bpm: 0, beatOffset: 0, barLen: 0, loopBars: 4,
       rate: 1, tempoPct: 0, peaks: null,
       loops: {},
+      cuePos: 0,
       mainVol: 1, loopVol: 1, mainMuted: false, loopMuted: false, cross: 0.5,
       deckVol: 1, deckMuted: false,
       mainBus: null, loopBus: null, outBus: null,
@@ -393,7 +394,7 @@
     if (deckHasContent(deckId)) return false;
     const it = playlistItemForDeck(deckId);
     if (!it?.stem) return false;
-    return it.stem.status === "starting" || it.stem.status === "running";
+    return it.stem.status === "starting" || it.stem.status === "running" || it.stem.status === "idle";
   }
 
   function plStemStatusLabel(stem) {
@@ -422,6 +423,7 @@
       stem.progress = 1;
       stem.message = sjob.message || "Ready";
       stem.error = null;
+      window.autoFillPlaylistToDecks?.();
     } else if (sjob.status === "error") {
       stem.status = "error";
       stem.error = sjob.error || "Separation failed";
@@ -448,6 +450,9 @@
       if (err) reject(err);
       else resolve();
     });
+    if (!err) {
+      window.autoFillPlaylistToDecks?.();
+    }
   }
 
   async function requestStemJobForItem(it) {
@@ -527,11 +532,119 @@
     });
   };
 
+  // Controlled stem separation queue: processes 1 heavy stem separation at a time
+  // to keep the system fast, responsive, and crash-free even when adding 20+ tracks.
+  const stemSplitQueue = [];
+  let activeStemSplits = 0;
+  const MAX_CONCURRENT_STEM_SPLITS = 1;
+
+  function processStemSplitQueue() {
+    if (activeStemSplits >= MAX_CONCURRENT_STEM_SPLITS || !stemSplitQueue.length) return;
+    const it = stemSplitQueue.shift();
+    const live = findPlaylistItem(it?.key);
+    if (!live) {
+      processStemSplitQueue();
+      return;
+    }
+    activeStemSplits++;
+    runSingleStemSplit(live).finally(() => {
+      activeStemSplits = Math.max(0, activeStemSplits - 1);
+      processStemSplitQueue();
+    });
+  }
+
+  async function runSingleStemSplit(it) {
+    const stem = initPlStem(it);
+    stem.status = "running";
+    stem.progress = 0;
+    stem.message = "Starting…";
+    stem.error = null;
+    window.updatePlaylistStemRow?.(it.key);
+
+    try {
+      const sjob = await requestStemJobForItem(it);
+      const live = findPlaylistItem(it.key);
+      if (!live) return;
+      const liveStem = initPlStem(live);
+      liveStem.stemId = sjob.id;
+      if (sjob.status === "ready") {
+        syncPlStemFromSnapshot(live, sjob);
+        notifyPlaylistStemWaiters(it.key);
+        return;
+      }
+      liveStem.status = "running";
+      liveStem.progress = sjob.progress || 0;
+      liveStem.message = sjob.message || "Splitting…";
+      window.updatePlaylistStemRow?.(it.key);
+      await new Promise((resolve) => {
+        pollPlaylistStemWithCallback(it.key, resolve);
+      });
+    } catch (e) {
+      const live = findPlaylistItem(it.key);
+      if (!live) return;
+      const liveStem = initPlStem(live);
+      liveStem.status = "error";
+      liveStem.error = e.message;
+      liveStem.message = e.message;
+      window.updatePlaylistStemRow?.(it.key);
+      notifyPlaylistStemWaiters(it.key, e);
+    }
+  }
+
+  function pollPlaylistStemWithCallback(key, onDone) {
+    clearPlaylistStemPoll(key);
+    const it = findPlaylistItem(key);
+    if (!it?.stem?.stemId) {
+      onDone?.();
+      return;
+    }
+    let fails = 0;
+    const pollId = setInterval(async () => {
+      const live = findPlaylistItem(key);
+      if (!live?.stem?.stemId) {
+        clearPlaylistStemPoll(key);
+        onDone?.();
+        return;
+      }
+      const stem = live.stem;
+      let s;
+      try {
+        s = await api(`/api/stems/${stem.stemId}`);
+        fails = 0;
+      } catch (e) {
+        fails += 1;
+        if (fails >= 8) {
+          clearPlaylistStemPoll(key);
+          stem.status = "error";
+          stem.error = e.message || "Lost connection to stem job";
+          stem.message = stem.error;
+          window.updatePlaylistStemRow?.(key);
+          notifyPlaylistStemWaiters(key, new Error(stem.error));
+          if (!anyDeckWorking()) setLoadStatus(anyDeckPlaying());
+          onDone?.();
+        }
+        return;
+      }
+      syncPlStemFromSnapshot(live, s);
+      if (s.status === "error") {
+        clearPlaylistStemPoll(key);
+        notifyPlaylistStemWaiters(key, new Error(stem.error || "Separation failed"));
+        if (!anyDeckWorking()) setLoadStatus(anyDeckPlaying());
+        onDone?.();
+      } else if (s.status === "ready") {
+        clearPlaylistStemPoll(key);
+        notifyPlaylistStemWaiters(key);
+        if (!anyDeckWorking()) setLoadStatus(anyDeckPlaying());
+        onDone?.();
+      }
+    }, 800);
+    playlistStemPolls.set(key, pollId);
+  }
+
   window.startPlaylistStemSplit = function startPlaylistStemSplit(it) {
     if (!isSplittablePlItem(it)) return;
     const stem = initPlStem(it);
-    if (stem.status === "ready" || stem.status === "starting" || stem.status === "running") return;
-    if (playlistStemPolls.has(it.key)) return;
+    if (stem.status === "ready") return;
 
     const cacheKey = stemCacheKey(it.jobId, { index: it.index, start: it.start, end: it.end });
     const memCached = stemCacheGet(cacheKey);
@@ -545,43 +658,25 @@
       return;
     }
 
-    stem.status = "starting";
+    if (stem.status === "running" && (playlistStemPolls.has(it.key) || stemSplitQueue.some((x) => x.key === it.key))) {
+      return;
+    }
+
+    stem.status = "running";
     stem.progress = 0;
-    stem.message = "Starting…";
+    stem.message = "Queued…";
     stem.error = null;
     window.updatePlaylistStemRow?.(it.key);
 
-    (async () => {
-      try {
-        const sjob = await requestStemJobForItem(it);
-        const live = findPlaylistItem(it.key);
-        if (!live) return;
-        const liveStem = initPlStem(live);
-        liveStem.stemId = sjob.id;
-        if (sjob.status === "ready") {
-          syncPlStemFromSnapshot(live, sjob);
-          notifyPlaylistStemWaiters(it.key);
-          return;
-        }
-        liveStem.status = "running";
-        liveStem.progress = sjob.progress || 0;
-        liveStem.message = sjob.message || "Splitting…";
-        window.updatePlaylistStemRow?.(it.key);
-        pollPlaylistStem(it.key);
-      } catch (e) {
-        const live = findPlaylistItem(it.key);
-        if (!live) return;
-        const liveStem = initPlStem(live);
-        liveStem.status = "error";
-        liveStem.error = e.message;
-        liveStem.message = e.message;
-        window.updatePlaylistStemRow?.(it.key);
-        notifyPlaylistStemWaiters(it.key, e);
-      }
-    })();
+    if (!stemSplitQueue.some((x) => x.key === it.key)) {
+      stemSplitQueue.push(it);
+    }
+    processStemSplitQueue();
   };
 
   window.stopPlaylistStemSplit = function stopPlaylistStemSplit(key) {
+    const idx = stemSplitQueue.findIndex((x) => x.key === key);
+    if (idx >= 0) stemSplitQueue.splice(idx, 1);
     clearPlaylistStemPoll(key);
     notifyPlaylistStemWaiters(key, new Error("Removed from playlist"));
   };
@@ -947,12 +1042,21 @@
     });
   }
 
+  function syncCueButton(id) {
+    const d = getDeck(id);
+    const btn = $d(".st-cue", id);
+    if (!btn) return;
+    const isAtCue = Math.abs(currentPos(d) - (d.cuePos || 0)) < 0.08;
+    btn.classList.toggle("at-cue", isAtCue && !d.playing);
+  }
+
   function syncPlayButton(id) {
     const d = getDeck(id);
     const btn = $d(".st-play", id);
     if (!btn) return;
     btn.classList.toggle("playing", !!d.playing);
     btn.innerHTML = transportIconSvg(d.playing ? "pause" : "play");
+    syncCueButton(id);
   }
 
   function syncMuteAllButton(id) {
@@ -1228,13 +1332,19 @@
       return false;
     }
     const targetEff = ref.bpm * (ref.rate || 1);
+    // Prefer half/double BPM when that lands closer to 1.0 within ±20%.
     let rate = targetEff / d.bpm;
+    for (const cand of [targetEff / (d.bpm * 2), targetEff / (d.bpm / 2)]) {
+      if (cand < SYNC_TEMPO_MIN || cand > SYNC_TEMPO_MAX) continue;
+      if (Math.abs(Math.log(cand)) < Math.abs(Math.log(rate))) rate = cand;
+    }
     rate = clampN(rate, SYNC_TEMPO_MIN, SYNC_TEMPO_MAX);
     const targetPct = (rate - 1) * 100;
     // One-shot absolute rate from base BPM — never compound against d.rate.
     setDeckTempo(deckId, targetPct, { live: true });
 
     // Phase-align only when both decks are playing (match Serato/VDJ behavior).
+    // Must actually seek audio — updating offset alone leaves sources out of phase.
     if (ref.playing && d.playing && Studio.ctx) {
       const intD = 60 / d.bpm;
       const posD = currentPos(d);
@@ -1245,8 +1355,7 @@
       diff = diff - Math.round(diff);
       const aligned = clampN(posD + diff * intD, 0, d.duration);
       if (Math.abs(aligned - posD) > 0.002) {
-        d.offset = aligned;
-        d.startCtxTime = Studio.ctx.currentTime;
+        seek(aligned, deckId);
       }
     }
     if (!silent) setDeckStatus(`Synced to deck ${refId}.`, false, deckId);
@@ -1544,6 +1653,19 @@
     Studio.deckOrder.forEach((id) => setDeckPlayState(id));
   }
 
+  window.isStemCached = function (jobId, track) {
+    if (!jobId || !track) return false;
+    const key = stemCacheKey(jobId, track);
+    return !!stemCacheGet(key);
+  };
+  window.isPlaylistTrackReady = function (it) {
+    if (!it) return false;
+    if (window.Spotify && Spotify.isItem(it)) return true;
+    if (window.AppleMusic && AppleMusic.isItem(it)) return true;
+    if (it.stem && it.stem.status === "ready") return true;
+    if (it.jobId && window.isStemCached(it.jobId, it)) return true;
+    return false;
+  };
   window.isStemSeparationActive = () => anyDeckWorking() || window.isPlaylistStemActive?.();
   window.isStudioPlaybackActive = () => anyDeckPlaying();
   window.getStudioFocusedDeckId = () => Studio.focusedId;
@@ -2514,7 +2636,7 @@
       if (!S.sets.simple) {
         if (S._loadSimpleP) return;
         if (!S.sets.stems?.order?.length) {
-          setDeckErr("Stems not ready yet.");
+          setDeckErr("Separating stems…");
           return;
         }
         loadSimple(Studio.focusedId);
@@ -2524,7 +2646,7 @@
         }
       }
     } else if (!S.sets.stems) {
-      setDeckErr("Stems not ready yet.");
+      setDeckErr("Separating stems…");
       return;
     }
     const pos = currentPos(S);
@@ -2575,11 +2697,14 @@
     } else if (d.studioErr) {
       msg = d.studioErr;
     } else if (d.track && d.jobId != null && !d.sets.stems && !d.sets.simple) {
-      msg = deckAwaitingPlaylistStems(deckId)
-        ? "Stems splitting in playlist — rows appear here when ready."
-        : "Separation did not start — press ▶ on the deck or reload from the playlist (⏏).";
+      if (deckAwaitingPlaylistStems(deckId)) {
+        msg = "Separating stems… vocal, drums, bass and EQ rows will appear here when ready.";
+      } else {
+        msg = "Preparing stems…";
+        beginStemSeparation(deckId);
+      }
     } else if (d.sets.stems && !Object.keys(d.sets.stems.stems || {}).length) {
-      msg = "Stem load failed — try loading the track again.";
+      msg = "Loading stems…";
     }
     let el = wrap.querySelector(".stem-rows-empty");
     if (!el) {
@@ -2894,24 +3019,18 @@
   function play(deckId = Studio.focusedId) {
     const d = getDeck(deckId);
     if (deckSepShowsOnDeck(deckId)) {
-      setDeckStatus("Stem separation still running…", false);
+      setDeckStatus("Separating stems — ready soon…", false);
       return;
     }
     if (deckAwaitingPlaylistStems(deckId)) {
-      setDeckStatus("Stems splitting — see playlist.", false);
+      setDeckStatus("Separating stems — ready soon…", false);
       return;
     }
     if (!ensureDeckPlaybackState(deckId)) {
       if (d.track && d.jobId != null && !deckHasContent(deckId)) {
-        if (playlistItemForDeck(deckId)) {
-          setDeckStatus("Stems not ready — see playlist.", false);
-          beginStemSeparation(deckId);
-        } else {
-          setDeckStatus("Starting stem separation…", false);
-          beginStemSeparation(deckId);
-        }
+        beginStemSeparation(deckId);
       } else {
-        setDeckStatus("No stems loaded — use ⏏ on the playlist.", false);
+        setDeckStatus("No track loaded — load a track from playlist.", false);
       }
       return;
     }
@@ -2942,6 +3061,19 @@
     ensureRafRunning();
   }
 
+  function stopCue(deckId = Studio.focusedId) {
+    const d = getDeck(deckId);
+    if (d.playing) {
+      pause(deckId);
+    }
+    d.offset = d.cuePos || 0;
+    d.playStartedAt = null;
+    updateTimeReadout(deckId);
+    syncPlayButton(deckId);
+    syncCueButton(deckId);
+    if (deckWaveLaneEl(deckId)) drawPlaylistDeckWave(deckId);
+  }
+
   function seek(t, deckId = Studio.focusedId) {
     const d = getDeck(deckId);
     if (!ensureDeckPlaybackState(deckId)) return;
@@ -2952,20 +3084,97 @@
     updateTimeReadout(deckId);
   }
 
+  const AUTO_TRANSITION_SEC = 6;
+
   function updateUI() {
+    const nowCtx = Studio.ctx?.currentTime || 0;
+
+    // Handle ongoing auto-crossfade transition
+    if (Studio.autoTransition) {
+      const tr = Studio.autoTransition;
+      const elapsed = Math.max(0, nowCtx - tr.startCtxTime);
+      const frac = Math.min(1, elapsed / tr.dur);
+      const fromD = getDeck(tr.fromId);
+      const toD = getDeck(tr.toId);
+      if (fromD) fromD.deckVol = Math.cos(frac * Math.PI / 2);
+      if (toD) toD.deckVol = Math.sin(frac * Math.PI / 2);
+      applyDeckMixer(tr.fromId);
+      applyDeckMixer(tr.toId);
+
+      if (frac >= 1 || (fromD && currentPos(fromD) >= fromD.duration - 0.05)) {
+        pause(tr.fromId);
+        seek(0, tr.fromId);
+        if (fromD) fromD.deckVol = 1.0;
+        if (toD) toD.deckVol = 1.0;
+        applyAllDeckMixers();
+        focusDeck(tr.toId);
+
+        // Preload upcoming track into fromDeck
+        if (toD?.track) {
+          const nextUp = window.getNextTrackAfter?.(toD.track);
+          if (nextUp && window.isPlaylistTrackReady?.(nextUp)) {
+            window.loadTrackToDeck?.(nextUp, tr.fromId, { silent: true });
+          }
+        }
+        Studio.autoTransition = null;
+      }
+    }
+
     Studio.deckOrder.forEach((deckId) => {
       const deck = getDeck(deckId);
       if (deck.duration > 0 && deck.track && deckWaveLaneEl(deckId)) drawPlaylistDeckWave(deckId);
       if (!deck.playing) return;
       updateTimeReadout(deckId);
-      if (currentPos(deck) >= deck.duration - 0.05) {
+
+      const pos = currentPos(deck);
+      const rem = deck.duration - pos;
+
+      // Check if we should initiate seamless transition to next deck
+      if (!Studio.autoTransition && deck.duration > AUTO_TRANSITION_SEC * 1.5 && rem <= AUTO_TRANSITION_SEC) {
+        const otherId = Studio.deckOrder.find((id) => id !== deckId) || (deckId === 1 ? 2 : 1);
+        const otherDeck = getDeck(otherId);
+        const nextTrack = window.getNextTrackAfter?.(deck.track);
+
+        if (nextTrack && otherDeck) {
+          if (!otherDeck.track || (otherDeck.track.key !== nextTrack.key && otherDeck.jobId !== nextTrack.jobId)) {
+            if (window.isPlaylistTrackReady?.(nextTrack)) {
+              window.loadTrackToDeck?.(nextTrack, otherId, { silent: true });
+            }
+          }
+          if (otherDeck.duration > 0 && otherDeck.track) {
+            otherDeck.deckVol = 0;
+            applyDeckMixer(otherId);
+            if (deck.bpm && otherDeck.bpm) {
+              try { masterSyncAllDecks(deckId); } catch (_) {}
+            }
+            if (!otherDeck.playing) play(otherId);
+            Studio.autoTransition = {
+              fromId: deckId,
+              toId: otherId,
+              startCtxTime: nowCtx,
+              dur: Math.max(2, rem),
+            };
+          }
+        }
+      }
+
+      // Hard stop fallback if track ends without active transition
+      if (pos >= deck.duration - 0.05 && !Studio.autoTransition) {
         pause(deckId);
         deck.offset = 0;
         deck.playStartedAt = null;
+        const nextTrack = window.getNextTrackAfter?.(deck.track);
+        if (nextTrack && window.isPlaylistTrackReady?.(nextTrack)) {
+          const nextDeckId = Studio.deckOrder.find((id) => id !== deckId) || deckId;
+          window.loadTrackToDeck?.(nextTrack, nextDeckId, { silent: true }).then(() => {
+            play(nextDeckId);
+          });
+        }
       }
     });
+
     updatePlaylistSyncStatus();
-    const keepRaf = anyDeckPlaying() || Studio.scratch.deckId != null;
+    const keepRaf = anyDeckPlaying() || Studio.scratch.deckId != null || !!Studio.autoTransition;
     if (!keepRaf) {
       stopRaf();
       syncAudioContextPower();
@@ -3101,6 +3310,11 @@
       focusDeck(id);
     });
 
+    $d(".st-cue", id)?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (id !== Studio.focusedId) focusDeck(id);
+      stopCue(id);
+    });
     $d(".st-play", id)?.addEventListener("click", (e) => {
       e.stopPropagation();
       if (id !== Studio.focusedId) focusDeck(id);
@@ -3220,18 +3434,12 @@
   });
   document.addEventListener("pointerdown", (e) => {
     if (e.target.closest(".stem-show-wrap")) return;
-    if (!e.target.closest(".deck-stem-drawer") && !e.target.closest(".deck-stems-toggle")) {
-      Studio.deckOrder.forEach((id) => {
-        if (getDeck(id).stemsOpen) toggleDeckStemDrawer(id, false);
-      });
-    }
     Studio.deckOrder.forEach((id) => toggleStemFilterPop(id, false));
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     Studio.deckOrder.forEach((id) => {
       toggleStemFilterPop(id, false);
-      if (getDeck(id).stemsOpen) toggleDeckStemDrawer(id, false);
     });
   });
 

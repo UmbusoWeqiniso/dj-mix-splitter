@@ -33,6 +33,7 @@
     jobId: null, data: null, duration: 0, poll: null,
     audioReady: false, awaitingResult: false,
     dragBoundary: -1,
+    selectedIndex: 0,
     viewStart: 0,
     viewEnd: 0,
     bpm: 0,
@@ -68,7 +69,13 @@
     if (parts.some((n) => Number.isNaN(n))) return null;
     if (parts.length === 1) return parts[0];
     if (parts.length === 2) return parts[0] * 60 + parts[1];
-    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 3) {
+      const hms = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      if (ED.duration && hms > ED.duration + 10 && (parts[0] * 60 + parts[1] <= ED.duration + 10)) {
+        return parts[0] * 60 + parts[1] + (parts[2] < 100 ? parts[2] / 100 : parts[2] / 1000);
+      }
+      return hms;
+    }
     return null;
   }
 
@@ -109,6 +116,7 @@
     ED.awaitingResult = false;
     $("#edit-progress").classList.add("hidden");
     $("#edit-redetect").disabled = false;
+    if ($("#edit-reidentify")) $("#edit-reidentify").disabled = false;
     $("#edit-redetect-status").textContent = "";
 
     const src = job.source || {};
@@ -132,6 +140,7 @@
 
     ED.bpm = 0;
     ED.barLen = 0;
+    ED.selectedIndex = 0;
     updateSkipHints();
     ensureBpm();
 
@@ -139,6 +148,7 @@
     renderBoundaries();
     renderRows();
     updateZoomLabel();
+    initPunch();
   }
 
   function viewRange() {
@@ -191,6 +201,7 @@
     updateBoundaryVisuals();
     updatePlayhead();
     updateZoomLabel();
+    updatePunchVisual();
   }
 
   function updateZoomLabel() {
@@ -400,46 +411,133 @@
 
   function updateRowCells(i) {
     const row = document.querySelector(`${ROW_SEL}[data-i="${i}"]`);
-    if (!row || !ED.data.tracks[i]) return;
+    if (!row || !ED.data?.tracks?.[i]) return;
     const t = ED.data.tracks[i];
-    const startInput = row.querySelector(".start");
-    if (startInput) startInput.value = fmtEdit(t.start);
+    const timeCell = row.querySelector(".c-time");
+    if (timeCell) timeCell.textContent = fmtEdit(t.start);
     const lenCell = row.querySelector(".c-len");
     if (lenCell) lenCell.innerHTML = seg7(fmtEdit(t.end - t.start), "pl-len");
+    if (ED.selectedIndex === i) {
+      const startInput = $("#inspect-start");
+      if (startInput && document.activeElement !== startInput) startInput.value = fmtEdit(t.start);
+      const lenInspect = $("#inspect-len");
+      if (lenInspect) lenInspect.innerHTML = seg7(fmtEdit(t.end - t.start), "pl-len");
+    }
+  }
+
+  function updateRowInfo(i) {
+    const row = document.querySelector(`${ROW_SEL}[data-i="${i}"]`);
+    if (!row || !ED.data?.tracks?.[i]) return;
+    const t = ED.data.tracks[i];
+    const titleEl = row.querySelector(".pl-title");
+    if (titleEl) titleEl.textContent = t.title || `Track ${String(i + 1).padStart(2, "0")}`;
+    const artistEl = row.querySelector(".pl-meta");
+    if (artistEl) artistEl.textContent = t.artist || "";
+  }
+
+  function selectTrack(i, { seek = false } = {}) {
+    if (!ED.data?.tracks || !ED.data.tracks[i]) return;
+    ED.selectedIndex = i;
+    const t = ED.data.tracks[i];
+
+    document.querySelectorAll(ROW_SEL).forEach((el) => {
+      if (Number(el.dataset.i) === i) el.classList.add("selected");
+      else el.classList.remove("selected");
+    });
+
+    const noEl = $("#inspect-no");
+    if (noEl) noEl.innerHTML = seg7(String(i + 1).padStart(2, "0"), "pl-no");
+
+    const titleEl = $("#inspect-title");
+    if (titleEl && document.activeElement !== titleEl) titleEl.value = t.title || "";
+
+    const artistEl = $("#inspect-artist");
+    if (artistEl && document.activeElement !== artistEl) artistEl.value = t.artist || "";
+
+    const startEl = $("#inspect-start");
+    if (startEl && document.activeElement !== startEl) startEl.value = fmtEdit(t.start);
+
+    const lenEl = $("#inspect-len");
+    if (lenEl) lenEl.innerHTML = seg7(fmtEdit(t.end - t.start), "pl-len");
+
+    const mergeBtn = $("#inspect-merge-btn");
+    if (mergeBtn) mergeBtn.disabled = i === 0;
+
+    const delBtn = $("#inspect-delete-btn");
+    if (delBtn) delBtn.disabled = ED.data.tracks.length <= 1;
+
+    if (seek) seekTo(t.start);
+    updateRowPlayback();
+  }
+
+  function toggleTrackPlay(i) {
+    if (!ED.data?.tracks?.[i]) return;
+    const t = ED.data.tracks[i];
+    const ct = audio.currentTime;
+    const isPlayingThis = ct >= t.start && ct < t.end && !audio.paused;
+    if (isPlayingThis) {
+      audio.pause();
+    } else {
+      seekTo(t.start);
+      audio.play();
+    }
+    selectTrack(i);
   }
 
   function renderRows() {
     const list = $("#edit-track-rows");
     list.innerHTML = "";
+
+    const hasQuotaNotice = (ED.data.tracks || []).some(
+      (t) => t.id_status === "error" && (t.id_message || "").toLowerCase().includes("limit exceeded")
+    );
+    const noticeEl = $("#edit-quota-notice");
+    if (noticeEl) {
+      if (hasQuotaNotice) {
+        noticeEl.classList.remove("hidden");
+        noticeEl.innerHTML = `⚠️ <span><strong>ACRCloud Limit Reached (Code 3003):</strong> Free daily API request limit is exhausted. Metadata fallbacks used where available. Update credentials in <code>.env</code> and click <strong>🔍 ID</strong> to re-identify.</span>`;
+      } else {
+        noticeEl.classList.add("hidden");
+      }
+    }
+
+    if (ED.selectedIndex >= ED.data.tracks.length) {
+      ED.selectedIndex = Math.max(0, ED.data.tracks.length - 1);
+    }
+
     ED.data.tracks.forEach((t, i) => {
       const row = document.createElement("div");
-      row.className = "edit-track-row";
+      row.className = "edit-track-row" + (i === ED.selectedIndex ? " selected" : "");
       row.dataset.i = i;
       row.innerHTML = `
+        <span class="c-play"><button type="button" class="row-play-btn" title="Play / Pause track" aria-label="Play track">▶</button></span>
         <span class="c-no">${seg7(String(i + 1).padStart(2, "0"), "pl-no")}</span>
-        <span class="c-time"><input class="start mono lcd-field" value="${fmtEdit(t.start)}" title="Track start time" /></span>
+        <span class="c-time mono">${fmtEdit(t.start)}</span>
         <span class="c-len">${seg7(fmtEdit(t.end - t.start), "pl-len")}</span>
-        <span class="c-title"><input class="title lcd-field" value="${escapeHtml(t.title || "")}" /></span>
-        <span class="c-artist"><input class="artist lcd-field" value="${escapeHtml(t.artist || "")}" /></span>
+        <div class="c-info">
+          <span class="pl-title">${escapeHtml(t.title || `Track ${String(i + 1).padStart(2, "0")}`)}</span>
+          <span class="pl-meta">${escapeHtml(t.artist || "")}</span>
+        </div>
         <span class="c-pads">
-          ${i > 0 ? `<button type="button" class="deck-pad pad-merge" title="Merge with previous"><span class="deck-pad-glyph">⬆</span></button>` : ""}
-          ${ED.data.tracks.length > 1 ? `<button type="button" class="deck-pad pad-delete" title="Delete track"><span class="deck-pad-glyph">✕</span></button>` : ""}
+          <button type="button" class="deck-pad pad-download" title="Download track MP3" aria-label="Download track"><span class="deck-pad-glyph">⬇</span></button>
         </span>`;
-      row.querySelector(".title").addEventListener("input", (e) => { t.title = e.target.value; });
-      row.querySelector(".artist").addEventListener("input", (e) => { t.artist = e.target.value; });
-      const startInput = row.querySelector(".start");
-      if (startInput) {
-        startInput.addEventListener("change", (e) => {
-          const secs = parseTime(e.target.value);
-          if (secs === null) { toast("Use a time like 3:20", true); renderRows(); return; }
-          setBoundary(i, secs);
-        });
-      }
-      row.querySelector(".pad-merge")?.addEventListener("click", () => mergeUp(i));
-      row.querySelector(".pad-delete")?.addEventListener("click", () => deleteTrack(i));
+
+      row.querySelector(".row-play-btn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleTrackPlay(i);
+      });
+
+      const dlBtn = row.querySelector(".pad-download");
+      dlBtn?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        downloadTrack(i, dlBtn);
+      });
+
       setupRowScrub(row, i);
       list.appendChild(row);
     });
+
+    selectTrack(ED.selectedIndex || 0);
     updateRowPlayback();
   }
 
@@ -495,6 +593,7 @@
     };
     tracks.splice(idx, 1, left, right);
     reindexTracks();
+    ED.selectedIndex = idx + 1;
     renderRows();
     refreshView();
   }
@@ -506,6 +605,7 @@
     if (!tracks[i - 1].title && tracks[i].title) tracks[i - 1].title = tracks[i].title;
     tracks.splice(i, 1);
     reindexTracks();
+    ED.selectedIndex = Math.max(0, i - 1);
     renderRows();
     refreshView();
   }
@@ -521,6 +621,7 @@
     else if (i < tracks.length - 1) tracks[i + 1].start = t.start;
     tracks.splice(i, 1);
     reindexTracks();
+    ED.selectedIndex = Math.max(0, Math.min(i, tracks.length - 1));
     renderRows();
     refreshView();
   }
@@ -534,7 +635,7 @@
   }
 
   function setupRowScrub(tr, i) {
-    const onControl = (el) => el.closest("input, button, a, label");
+    const onControl = (el) => el.closest("button, a, label, input");
     let scrubbing = false;
     const seekFrac = (clientX) => {
       const t = ED.data.tracks[i];
@@ -545,6 +646,7 @@
     };
     tr.addEventListener("pointerdown", (e) => {
       if (onControl(e.target)) return;
+      selectTrack(i);
       scrubbing = true;
       tr.classList.add("scrubbing");
       try { tr.setPointerCapture(e.pointerId); } catch (_) {}
@@ -572,16 +674,30 @@
     const active = currentTrackIndex();
     document.querySelectorAll(ROW_SEL).forEach((el) => {
       const i = Number(el.dataset.i);
+      const playBtn = el.querySelector(".row-play-btn");
       if (i === active) {
         const t = ED.data.tracks[i];
         const prog = Math.min(1, Math.max(0, (audio.currentTime - t.start) / Math.max(0.1, t.end - t.start)));
         el.classList.add("playing");
         el.style.setProperty("--prog", prog.toFixed(4));
+        if (playBtn) playBtn.innerHTML = audio.paused ? "▶" : "⏸";
       } else {
         el.classList.remove("playing");
         el.style.removeProperty("--prog");
+        if (playBtn) playBtn.innerHTML = "▶";
       }
     });
+
+    const inspectPlay = $("#inspect-play-btn");
+    if (inspectPlay) {
+      const isSelectedPlaying = ED.selectedIndex === active && !audio.paused;
+      const glyph = inspectPlay.querySelector(".deck-pad-glyph");
+      const text = inspectPlay.querySelector(".inspect-btn-text");
+      if (glyph) glyph.textContent = isSelectedPlaying ? "⏸" : "▶";
+      if (text) text.textContent = isSelectedPlaying ? "PAUSE" : "PLAY";
+      if (isSelectedPlaying) inspectPlay.classList.add("active");
+      else inspectPlay.classList.remove("active");
+    }
   }
 
   function seekTo(t) {
@@ -658,20 +774,16 @@
   }
 
   function collectTracks() {
-    const rows = [...document.querySelectorAll(ROW_SEL)];
-    return rows.map((tr, i) => {
-      const t = ED.data.tracks[i];
-      return {
-        index: t.index,
-        start: t.start,
-        end: t.end,
-        title: tr.querySelector(".title").value.trim(),
-        artist: tr.querySelector(".artist").value.trim(),
-        id_status: t.id_status || "unknown",
-        id_message: t.id_message || "",
-        score: t.score ?? null,
-      };
-    });
+    return (ED.data?.tracks || []).map((t, i) => ({
+      index: i + 1,
+      start: t.start,
+      end: t.end,
+      title: (t.title || "").trim(),
+      artist: (t.artist || "").trim(),
+      id_status: t.id_status || "unknown",
+      id_message: t.id_message || "",
+      score: t.score ?? null,
+    }));
   }
 
   async function saveTracks() {
@@ -693,6 +805,96 @@
     }
   }
 
+  async function downloadTrack(i, btn) {
+    const t = ED.data?.tracks?.[i];
+    if (!t || !ED.jobId) return;
+    const origHtml = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.classList.add("exporting");
+      btn.innerHTML = `<span class="deck-pad-glyph">⏳</span>`;
+    }
+    toast(`Exporting “${t.title || `Track ${i + 1}`}”…`);
+    try {
+      const res = await api(`/api/jobs/${ED.jobId}/track`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          start: t.start,
+          end: t.end,
+          title: t.title || "",
+          artist: t.artist || "",
+          index: i + 1,
+        }),
+      });
+      if (res && res.filename) {
+        const a = document.createElement("a");
+        a.href = `/api/jobs/${ED.jobId}/download/${encodeURIComponent(res.filename)}`;
+        a.download = res.filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        toast(`Downloaded “${res.title || `Track ${i + 1}`}”`);
+      } else {
+        toast("Download failed: invalid server response.", true);
+      }
+    } catch (err) {
+      toast(`Download failed: ${err.message || err}`, true);
+    } finally {
+      if (btn) {
+        btn.classList.remove("exporting");
+        btn.innerHTML = origHtml;
+      }
+    }
+  }
+
+  async function exportZip() {
+    if (!ED.jobId || !ED.data?.tracks?.length) return;
+    const tracks = collectTracks().map((t) => ({
+      start: t.start,
+      end: t.end,
+      title: t.title || "",
+      artist: t.artist || "",
+    }));
+    const btn = $("#edit-export-zip");
+    if (btn) btn.disabled = true;
+    toast("Exporting all tracks to ZIP…");
+    try {
+      await api(`/api/jobs/${ED.jobId}/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tracks }),
+      });
+      const interval = setInterval(async () => {
+        try {
+          const job = await api(`/api/jobs/${ED.jobId}`);
+          if (job.status === "error") {
+            clearInterval(interval);
+            if (btn) btn.disabled = false;
+            toast(job.error || "ZIP export failed", true);
+            return;
+          }
+          if (job.export && job.export.zip) {
+            clearInterval(interval);
+            if (btn) btn.disabled = false;
+            const a = document.createElement("a");
+            a.href = `/api/jobs/${ED.jobId}/download`;
+            a.download = `${(job.source?.title || "tracks").replace(/\//g, "_")}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            toast("ZIP download started!");
+          }
+        } catch (_) {
+          clearInterval(interval);
+          if (btn) btn.disabled = false;
+        }
+      }, 1000);
+    } catch (e) {
+      toast(`Export failed: ${e.message}`, true);
+      if (btn) btn.disabled = false;
+    }
+  }
+
   function startPolling() {
     clearInterval(ED.poll);
     ED.poll = setInterval(pollOnce, 900);
@@ -706,8 +908,9 @@
     if (job.status === "error") {
       clearInterval(ED.poll);
       $("#edit-redetect").disabled = false;
+      if ($("#edit-reidentify")) $("#edit-reidentify").disabled = false;
       $("#edit-progress").classList.add("hidden");
-      toast(job.error || "Re-split failed", true);
+      toast(job.error || "Operation failed", true);
       return;
     }
     if (job.status === "running") {
@@ -745,6 +948,519 @@
       $("#edit-redetect-status").textContent = "";
       ED.awaitingResult = false;
     }
+  }
+
+  async function reidentify() {
+    if (!ED.jobId || !ED.data) return;
+    const btn = $("#edit-reidentify");
+    if (btn) btn.disabled = true;
+    $("#edit-redetect-status").textContent = "Re-identifying…";
+    ED.awaitingResult = true;
+    $("#edit-status").textContent = "IDENTIFYING";
+    $("#edit-status").className = "lcd-status playing";
+    try {
+      await api(`/api/jobs/${ED.jobId}/reidentify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      startPolling();
+    } catch (e) {
+      toast(e.message, true);
+      if (btn) btn.disabled = false;
+      $("#edit-redetect-status").textContent = "";
+      ED.awaitingResult = false;
+    }
+  }
+
+  // ==================== STEM PUNCH & STITCH UNIT ====================
+  const STEM_LABELS = {
+    vocals: "VOC", kick: "KICK", drums: "DRM", bass: "BASS",
+    guitar: "GTR", piano: "KEY", synth: "SYN", perc: "PERC", other: "OTHER",
+    instrumental: "INST",
+  };
+  const STEM_LEDS = {
+    vocals: "#ff5c7a", kick: "#ff4d2e", drums: "#f5a623", bass: "#29a3d3",
+    guitar: "#3ddc84", piano: "#ff8a5c", synth: "#9b6bff", perc: "#2fd4c0",
+    other: "#ff9f3e", instrumental: "#ff9f3e",
+  };
+
+  const PUNCH = {
+    open: false,
+    inTime: 0,
+    outTime: 5,
+    quality: "balanced",
+    stemId: null,
+    stems: {},
+    order: [],
+    muted: new Set(["vocals"]),
+    splitRange: null,
+    poll: null,
+    previewAudio: new Audio(),
+    isPlayingOrig: false,
+    isPlayingEdit: false,
+    stopTimer: null,
+  };
+
+  function updatePunchVisual() {
+    const punch = $("#edit-punch-region");
+    if (!punch || !ED.duration) return;
+    if (!PUNCH.open && PUNCH.inTime === 0 && PUNCH.outTime === 0) {
+      punch.classList.add("hidden");
+      return;
+    }
+    const { span } = viewRange();
+    if (!span) return;
+    const inPct = timeToViewPct(PUNCH.inTime);
+    const outPct = timeToViewPct(PUNCH.outTime);
+    punch.classList.remove("hidden");
+    punch.style.left = Math.max(0, inPct) + "%";
+    punch.style.width = Math.max(0.4, outPct - inPct) + "%";
+
+    const inFld = $("#punch-in");
+    const outFld = $("#punch-out");
+    const lenFld = $("#punch-len");
+    if (inFld && document.activeElement !== inFld) inFld.value = fmtEdit(PUNCH.inTime);
+    if (outFld && document.activeElement !== outFld) outFld.value = fmtEdit(PUNCH.outTime);
+    if (lenFld) lenFld.textContent = fmtEdit(Math.max(0, PUNCH.outTime - PUNCH.inTime));
+  }
+
+  function setPunchIn(sec) {
+    sec = Math.max(0, Math.min(ED.duration || 0, Math.round(sec * 100) / 100));
+    PUNCH.inTime = sec;
+    if (PUNCH.outTime <= PUNCH.inTime) {
+      PUNCH.outTime = Math.min(ED.duration || (sec + 5), sec + 5);
+    }
+    onPunchRangeChanged();
+    updatePunchVisual();
+  }
+
+  function setPunchOut(sec) {
+    sec = Math.max(0, Math.min(ED.duration || 0, Math.round(sec * 100) / 100));
+    PUNCH.outTime = sec;
+    if (PUNCH.inTime >= PUNCH.outTime) {
+      PUNCH.inTime = Math.max(0, sec - 5);
+    }
+    onPunchRangeChanged();
+    updatePunchVisual();
+  }
+
+  function onPunchRangeChanged() {
+    if (PUNCH.splitRange) {
+      const [s, e, q] = PUNCH.splitRange;
+      if (Math.abs(s - PUNCH.inTime) > 0.05 || Math.abs(e - PUNCH.outTime) > 0.05 || q !== PUNCH.quality) {
+        PUNCH.splitRange = null;
+        PUNCH.stemId = null;
+        PUNCH.stems = {};
+        renderPunchStems(false);
+        setPunchState("SET RANGE", "paused");
+        setPunchMsg("Range changed — press SPLIT to separate stems.", "");
+        const editBtn = $("#punch-play-edit");
+        const applyBtn = $("#punch-apply");
+        if (editBtn) editBtn.disabled = true;
+        if (applyBtn) applyBtn.disabled = true;
+      }
+    }
+  }
+
+  function setPunchState(text, cls = "paused") {
+    const el = $("#punch-state");
+    if (el) {
+      el.textContent = text;
+      el.className = `lcd-status ${cls}`;
+    }
+  }
+
+  function setPunchMsg(text, cls = "") {
+    const el = $("#punch-msg");
+    if (el) {
+      el.textContent = text;
+      el.className = `punch-msg ${cls}`.trim();
+    }
+  }
+
+  async function checkPunchEditState() {
+    if (!ED.jobId) return;
+    try {
+      const state = await api(`/api/jobs/${ED.jobId}/stitch`);
+      const revertBtn = $("#punch-revert");
+      if (revertBtn) {
+        if (state.has_backup) revertBtn.classList.remove("hidden");
+        else revertBtn.classList.add("hidden");
+      }
+    } catch (_) {}
+  }
+
+  function initPunch() {
+    PUNCH.inTime = 0;
+    PUNCH.outTime = Math.min(ED.duration || 5, Math.max(5, ED.data?.tracks?.[0]?.end || 5));
+    PUNCH.stemId = null;
+    PUNCH.stems = {};
+    PUNCH.order = [];
+    PUNCH.muted = new Set(["vocals"]);
+    PUNCH.splitRange = null;
+    renderPunchStems(false);
+    checkPunchEditState();
+    updatePunchVisual();
+  }
+
+  function togglePunchModal(show) {
+    PUNCH.open = typeof show === "boolean" ? show : !PUNCH.open;
+    const modal = $("#punch-modal");
+    const openBtn = $("#edit-punch-open");
+    const region = $("#edit-punch-region");
+
+    if (PUNCH.open) {
+      modal?.classList.remove("hidden");
+      openBtn?.classList.add("on");
+      region?.classList.remove("hidden");
+      if (PUNCH.inTime === 0 && PUNCH.outTime <= 5 && audio.currentTime > 0) {
+        setPunchIn(audio.currentTime);
+      }
+      updatePunchVisual();
+      checkPunchEditState();
+    } else {
+      modal?.classList.add("hidden");
+      openBtn?.classList.remove("on");
+      region?.classList.add("hidden");
+      stopPunchAudition();
+    }
+  }
+
+  function renderPunchStems(isReady = true) {
+    const rack = $("#punch-stems");
+    if (!rack) return;
+    rack.innerHTML = "";
+    if (!isReady || !PUNCH.order.length) {
+      rack.classList.add("is-off");
+      rack.innerHTML = `<p class="punch-hint">Set IN / OUT, then press <b>SPLIT</b>.</p>`;
+      return;
+    }
+    rack.classList.remove("is-off");
+    PUNCH.order.forEach((name) => {
+      if (!PUNCH.stems[name]) return;
+      const isMuted = PUNCH.muted.has(name);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `mix-tbtn punch-stem ${isMuted ? "muted" : ""}`;
+      btn.dataset.name = name;
+      btn.title = isMuted ? `Unmute ${name}` : `Mute ${name}`;
+      btn.innerHTML = `
+        <span class="led" style="--c: ${STEM_LEDS[name] || "#ff9f3e"}"></span>
+        <span class="name">${escapeHtml(STEM_LABELS[name] || name)}</span>
+        <span class="st">${isMuted ? "OFF" : "ON"}</span>
+      `;
+      btn.addEventListener("click", () => {
+        if (PUNCH.muted.has(name)) {
+          PUNCH.muted.delete(name);
+        } else {
+          PUNCH.muted.add(name);
+        }
+        renderPunchStems(true);
+        const editBtn = $("#punch-play-edit");
+        const applyBtn = $("#punch-apply");
+        const hasMuted = PUNCH.muted.size > 0;
+        if (editBtn) editBtn.disabled = !hasMuted;
+        if (applyBtn) applyBtn.disabled = !hasMuted;
+        if (hasMuted) {
+          const names = [...PUNCH.muted].map((s) => (STEM_LABELS[s] || s).toUpperCase()).join(", ");
+          setPunchMsg(`Muting: ${names}. Click EDIT to audition or STITCH to save.`);
+        } else {
+          setPunchMsg("Nothing muted. Click a stem (e.g. VOC) to switch it off.");
+        }
+      });
+      rack.appendChild(btn);
+    });
+  }
+
+  async function separatePunchStems() {
+    if (!ED.jobId) return;
+    if (PUNCH.outTime - PUNCH.inTime < 0.1) {
+      toast("OUT must be after IN.", true);
+      return;
+    }
+    const btn = $("#punch-separate");
+    const prog = $("#punch-progress");
+    const bar = $("#punch-bar");
+
+    if (btn) btn.disabled = true;
+    prog?.classList.remove("hidden");
+    if (bar) bar.style.width = "5%";
+    setPunchState("SPLITTING", "working");
+    setPunchMsg(`Splitting ${fmtEdit(PUNCH.inTime)} – ${fmtEdit(PUNCH.outTime)} (${PUNCH.quality})…`);
+
+    try {
+      const res = await api(`/api/jobs/${ED.jobId}/stitch/separate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          start: PUNCH.inTime,
+          end: PUNCH.outTime,
+          quality: PUNCH.quality,
+        }),
+      });
+
+      if (res.status === "running") {
+        pollPunchStems(res.id);
+      } else if (res.status === "ready") {
+        applyPunchStemsReady(res);
+      }
+    } catch (e) {
+      toast(e.message, true);
+      prog?.classList.add("hidden");
+      if (btn) btn.disabled = false;
+      setPunchState("ERROR", "error");
+      setPunchMsg(e.message, "bad");
+    }
+  }
+
+  function pollPunchStems(stemId) {
+    clearInterval(PUNCH.poll);
+    PUNCH.poll = setInterval(async () => {
+      try {
+        const job = await api(`/api/stems/${stemId}`);
+        const bar = $("#punch-bar");
+        if (bar) bar.style.width = `${Math.round((job.progress || 0) * 100)}%`;
+        if (job.status === "ready") {
+          clearInterval(PUNCH.poll);
+          applyPunchStemsReady(job);
+        } else if (job.status === "error") {
+          clearInterval(PUNCH.poll);
+          $("#punch-progress")?.classList.add("hidden");
+          const sepBtn = $("#punch-separate");
+          if (sepBtn) sepBtn.disabled = false;
+          setPunchState("ERROR", "error");
+          setPunchMsg(job.error || "Separation failed.", "bad");
+          toast(job.error || "Separation failed", true);
+        }
+      } catch (_) {
+        clearInterval(PUNCH.poll);
+        $("#punch-progress")?.classList.add("hidden");
+        const sepBtn = $("#punch-separate");
+        if (sepBtn) sepBtn.disabled = false;
+      }
+    }, 600);
+  }
+
+  function applyPunchStemsReady(res) {
+    PUNCH.stemId = res.id;
+    PUNCH.stems = res.stems || {};
+    PUNCH.order = res.order || Object.keys(PUNCH.stems);
+    PUNCH.splitRange = [PUNCH.inTime, PUNCH.outTime, PUNCH.quality];
+    if (PUNCH.stems.vocals && !PUNCH.muted.size) {
+      PUNCH.muted.add("vocals");
+    }
+
+    $("#punch-progress")?.classList.add("hidden");
+    const sepBtn = $("#punch-separate");
+    if (sepBtn) sepBtn.disabled = false;
+    const editBtn = $("#punch-play-edit");
+    const applyBtn = $("#punch-apply");
+    if (editBtn) editBtn.disabled = PUNCH.muted.size === 0;
+    if (applyBtn) applyBtn.disabled = PUNCH.muted.size === 0;
+
+    renderPunchStems(true);
+    setPunchState("READY", "playing");
+    setPunchMsg("Stems ready. Vocals muted by default — click EDIT to audition.", "ok");
+    toast("Stems split for selected range!");
+  }
+
+  function stopPunchAudition() {
+    clearTimeout(PUNCH.stopTimer);
+    if (PUNCH.isPlayingOrig) {
+      audio.pause();
+      PUNCH.isPlayingOrig = false;
+      const btn = $("#punch-play-orig");
+      if (btn) btn.textContent = "▶ ORIG";
+    }
+    if (PUNCH.isPlayingEdit) {
+      PUNCH.previewAudio.pause();
+      PUNCH.isPlayingEdit = false;
+      const btn = $("#punch-play-edit");
+      if (btn) btn.textContent = "▶ EDIT";
+    }
+  }
+
+  function playPunchOrig() {
+    const btn = $("#punch-play-orig");
+    if (PUNCH.isPlayingOrig) {
+      stopPunchAudition();
+      return;
+    }
+    stopPunchAudition();
+    PUNCH.isPlayingOrig = true;
+    if (btn) btn.textContent = "⏹ STOP";
+
+    const lead = 4.0;
+    const playStart = Math.max(0, PUNCH.inTime - lead);
+    const playEnd = Math.min(ED.duration, PUNCH.outTime + lead);
+    seekTo(playStart);
+    audio.play();
+
+    const checkStop = () => {
+      if (!PUNCH.isPlayingOrig) return;
+      if (audio.currentTime >= playEnd || audio.paused) {
+        stopPunchAudition();
+      } else {
+        PUNCH.stopTimer = setTimeout(checkStop, 80);
+      }
+    };
+    PUNCH.stopTimer = setTimeout(checkStop, 100);
+  }
+
+  async function playPunchEdit() {
+    const btn = $("#punch-play-edit");
+    if (PUNCH.isPlayingEdit) {
+      stopPunchAudition();
+      return;
+    }
+    if (!ED.jobId || !PUNCH.splitRange) {
+      toast("Please split stems first.", true);
+      return;
+    }
+    if (!PUNCH.muted.size) {
+      toast("Click a stem (e.g. VOC) to mute first.", true);
+      return;
+    }
+    stopPunchAudition();
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "⏳ …";
+    }
+    setPunchMsg("Rendering preview clip…");
+
+    try {
+      const res = await api(`/api/jobs/${ED.jobId}/stitch/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          start: PUNCH.inTime,
+          end: PUNCH.outTime,
+          quality: PUNCH.quality,
+          muted: [...PUNCH.muted],
+        }),
+      });
+
+      PUNCH.previewAudio.src = res.url;
+      PUNCH.previewAudio.currentTime = 0;
+      await PUNCH.previewAudio.play();
+      PUNCH.isPlayingEdit = true;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "⏹ STOP";
+      }
+      setPunchMsg("Auditioning edit in context (4s lead-in / out)…", "ok");
+
+      const onEnded = () => {
+        stopPunchAudition();
+        PUNCH.previewAudio.removeEventListener("ended", onEnded);
+      };
+      PUNCH.previewAudio.addEventListener("ended", onEnded, { once: true });
+    } catch (e) {
+      stopPunchAudition();
+      toast(e.message, true);
+      setPunchMsg(e.message, "bad");
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "▶ EDIT";
+      }
+    }
+  }
+
+  async function applyPunchStitch() {
+    if (!ED.jobId || !PUNCH.splitRange) {
+      toast("Split stems first.", true);
+      return;
+    }
+    if (!PUNCH.muted.size) {
+      toast("Mute at least one stem first.", true);
+      return;
+    }
+    const btn = $("#punch-apply");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "⏳ …";
+    }
+    stopPunchAudition();
+    setPunchState("STITCHING", "working");
+    setPunchMsg("Splicing edit seamlessly into song audio…");
+
+    try {
+      const res = await api(`/api/jobs/${ED.jobId}/stitch/apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          start: PUNCH.inTime,
+          end: PUNCH.outTime,
+          quality: PUNCH.quality,
+          muted: [...PUNCH.muted],
+        }),
+      });
+
+      if (res.waveform) {
+        ED.data.waveform = res.waveform;
+        drawWave();
+      }
+      const ct = audio.currentTime;
+      audio.src = `/api/jobs/${ED.jobId}/audio?t=${Date.now()}`;
+      audio.addEventListener("canplay", () => { audio.currentTime = ct; }, { once: true });
+      audio.load();
+
+      $("#punch-revert")?.classList.remove("hidden");
+      setPunchState("APPLIED", "playing");
+      setPunchMsg(`Stitched! ${fmtEdit(PUNCH.inTime)}–${fmtEdit(PUNCH.outTime)} replaced with muted edit.`, "ok");
+      toast("Song audio updated with seamless stitch!");
+    } catch (e) {
+      toast(e.message, true);
+      setPunchState("ERROR", "error");
+      setPunchMsg(e.message, "bad");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "STITCH";
+      }
+    }
+  }
+
+  async function revertPunchStitch() {
+    if (!ED.jobId) return;
+    const btn = $("#punch-revert");
+    if (btn) btn.disabled = true;
+    stopPunchAudition();
+    setPunchMsg("Restoring original song audio…");
+
+    try {
+      const res = await api(`/api/jobs/${ED.jobId}/stitch/revert`, { method: "POST" });
+      if (res.waveform) {
+        ED.data.waveform = res.waveform;
+        drawWave();
+      }
+      const ct = audio.currentTime;
+      audio.src = `/api/jobs/${ED.jobId}/audio?t=${Date.now()}`;
+      audio.addEventListener("canplay", () => { audio.currentTime = ct; }, { once: true });
+      audio.load();
+
+      $("#punch-revert")?.classList.add("hidden");
+      setPunchState("REVERTED", "paused");
+      setPunchMsg("Song restored to original.", "ok");
+      toast("Restored original song audio.");
+    } catch (e) {
+      toast(e.message, true);
+      setPunchMsg(e.message, "bad");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function downloadPunchMp3() {
+    if (!ED.jobId) return;
+    toast("Preparing MP3 download…");
+    const a = document.createElement("a");
+    a.href = `/api/jobs/${ED.jobId}/download-stitched?t=${Date.now()}`;
+    const name = ($("#edit-mix-title")?.textContent || "song").trim().replace(/[/\\?%*:|"<>]/g, "_");
+    a.download = `${name} [Edit].mp3`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 
   function setupWaveView() {
@@ -851,6 +1567,9 @@
 
   function closeEditStudio(reset = true) {
     clearInterval(ED.poll);
+    stopPunchAudition();
+    clearInterval(PUNCH.poll);
+    togglePunchModal(false);
     if (reset) {
       audio.pause();
       audio.removeAttribute("src");
@@ -869,14 +1588,19 @@
     if (e.target.id === "edit-studio") closeEditStudio();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !$("#edit-studio").classList.contains("hidden")) closeEditStudio();
+    if (e.key === "Escape" && !$("#edit-studio").classList.contains("hidden")) {
+      if (PUNCH.open) togglePunchModal(false);
+      else closeEditStudio();
+    }
   });
   $("#edit-play").addEventListener("click", () => { audio.paused ? audio.play() : audio.pause(); });
   $("#edit-skip-back").addEventListener("click", () => skipBy(-skipStep()));
   $("#edit-skip-fwd").addEventListener("click", () => skipBy(skipStep()));
   $("#edit-split").addEventListener("click", () => splitAt(audio.currentTime || 0));
   $("#edit-save").addEventListener("click", saveTracks);
+  $("#edit-export-zip")?.addEventListener("click", exportZip);
   $("#edit-redetect").addEventListener("click", redetect);
+  $("#edit-reidentify")?.addEventListener("click", reidentify);
   $("#edit-zoom-in").addEventListener("click", () => {
     zoomAt(ZOOM_STEP, audio.currentTime || viewRange().start);
   });
@@ -887,6 +1611,113 @@
   $("#edit-sensitivity").addEventListener("input", (e) => {
     $("#edit-sens-val").textContent = e.target.value;
   });
+
+  // Track Inspector setup
+  function setupInspector() {
+    const titleInput = $("#inspect-title");
+    titleInput?.addEventListener("input", (e) => {
+      const i = ED.selectedIndex;
+      if (i >= 0 && ED.data?.tracks?.[i]) {
+        ED.data.tracks[i].title = e.target.value;
+        updateRowInfo(i);
+      }
+    });
+
+    const artistInput = $("#inspect-artist");
+    artistInput?.addEventListener("input", (e) => {
+      const i = ED.selectedIndex;
+      if (i >= 0 && ED.data?.tracks?.[i]) {
+        ED.data.tracks[i].artist = e.target.value;
+        updateRowInfo(i);
+      }
+    });
+
+    const startInput = $("#inspect-start");
+    startInput?.addEventListener("change", (e) => {
+      const i = ED.selectedIndex;
+      if (i >= 0 && ED.data?.tracks?.[i]) {
+        const secs = parseTime(e.target.value);
+        if (secs === null) {
+          toast("Use a time like 3:20", true);
+          startInput.value = fmtEdit(ED.data.tracks[i].start);
+          return;
+        }
+        setBoundary(i, secs);
+        selectTrack(i);
+      }
+    });
+
+    $("#inspect-snap-now")?.addEventListener("click", () => {
+      const i = ED.selectedIndex;
+      if (i >= 0 && ED.data?.tracks?.[i]) {
+        const curTime = audio.currentTime || 0;
+        setBoundary(i, curTime);
+        selectTrack(i);
+        toast(`Track ${String(i + 1).padStart(2, "0")} start set to ${fmtEdit(curTime)}.`);
+      }
+    });
+
+    $("#inspect-play-btn")?.addEventListener("click", () => {
+      toggleTrackPlay(ED.selectedIndex);
+    });
+
+    $("#inspect-download-btn")?.addEventListener("click", () => {
+      const i = ED.selectedIndex;
+      const btn = $("#inspect-download-btn");
+      if (i >= 0) downloadTrack(i, btn);
+    });
+
+    $("#inspect-merge-btn")?.addEventListener("click", () => {
+      const i = ED.selectedIndex;
+      if (i > 0) mergeUp(i);
+    });
+
+    $("#inspect-delete-btn")?.addEventListener("click", () => {
+      const i = ED.selectedIndex;
+      if (i >= 0) deleteTrack(i);
+    });
+  }
+  setupInspector();
+
+  // Punch modal controls
+  $("#edit-punch-open")?.addEventListener("click", () => togglePunchModal());
+  $("#punch-close")?.addEventListener("click", () => togglePunchModal(false));
+  $("#punch-set-in")?.addEventListener("click", () => setPunchIn(audio.currentTime || 0));
+  $("#punch-set-out")?.addEventListener("click", () => setPunchOut(audio.currentTime || 0));
+  $("#punch-track")?.addEventListener("click", () => {
+    let idx = currentTrackIndex();
+    if (idx < 0) idx = 0;
+    const t = ED.data?.tracks?.[idx];
+    if (t) {
+      setPunchIn(t.start);
+      setPunchOut(t.end);
+      toast(`Selected Track ${idx + 1} (${fmtEdit(t.start)} – ${fmtEdit(t.end)})`);
+    }
+  });
+  $("#punch-in")?.addEventListener("change", (e) => {
+    const v = parseTime(e.target.value);
+    if (v !== null) setPunchIn(v);
+    else e.target.value = fmtEdit(PUNCH.inTime);
+  });
+  $("#punch-out")?.addEventListener("change", (e) => {
+    const v = parseTime(e.target.value);
+    if (v !== null) setPunchOut(v);
+    else e.target.value = fmtEdit(PUNCH.outTime);
+  });
+  document.querySelectorAll(".punch-quality .seg").forEach((seg) => {
+    seg.addEventListener("click", () => {
+      document.querySelectorAll(".punch-quality .seg").forEach((b) => b.classList.toggle("on", b === seg));
+      PUNCH.quality = seg.dataset.q;
+      onPunchRangeChanged();
+    });
+  });
+  $("#punch-separate")?.addEventListener("click", separatePunchStems);
+  $("#punch-play-orig")?.addEventListener("click", playPunchOrig);
+  $("#punch-play-edit")?.addEventListener("click", playPunchEdit);
+  $("#punch-apply")?.addEventListener("click", applyPunchStitch);
+  $("#punch-revert")?.addEventListener("click", revertPunchStitch);
+  $("#punch-mp3")?.addEventListener("click", downloadPunchMp3);
+
   audio.addEventListener("play", () => {
     $("#edit-play").textContent = "⏸";
     $("#edit-status").textContent = "PLAYING";

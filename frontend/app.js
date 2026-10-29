@@ -16,6 +16,7 @@ const DL = {
   items: [],            // { key, jobId, index, start, end, title, artist, mix }
   seen: new Set(),
   open: new Set(),      // jobIds whose folder is expanded
+  filter: "",           // search query to filter library tracks
 };
 const PL = {
   items: [],
@@ -59,7 +60,19 @@ function renderHealth() {
   const el = $("#health");
   if (!h || !el) return;
   const ff = `<span class="pill svc-ffmpeg ${h.ffmpeg ? "ok" : "bad"}">ffmpeg ${h.ffmpeg ? "ready" : "missing"}</span>`;
-  const ac = `<span class="pill svc-acr ${h.acrcloud_configured ? "ok" : ""}">ACRCloud ${h.acrcloud_configured ? "on" : "off"}</span>`;
+  let acClass = "";
+  let acText = "off";
+  let acTitle = "ACRCloud not configured";
+  if (h.acrcloud_status === "quota_exceeded") {
+    acClass = "warn";
+    acText = "limit reached";
+    acTitle = "ACRCloud free quota exceeded (code 3003). Update credentials in .env to restore track recognition.";
+  } else if (h.acrcloud_configured) {
+    acClass = "ok";
+    acText = "on";
+    acTitle = "ACRCloud active";
+  }
+  const ac = `<span class="pill svc-acr ${acClass}" title="${escapeHtml(acTitle)}">ACRCloud ${acText}</span>`;
   el.innerHTML = ff + ac;
 }
 
@@ -101,35 +114,113 @@ async function pollResources() {
 window.refreshResources = pollResources;
 
 // ---------- load menu ----------
-function toggleLoadMenu(force) {
+function toggleLoadMenu(force, focusTarget = "url") {
   const m = $("#load-menu");
   const show = force !== undefined ? force : m.classList.contains("hidden");
   m.classList.toggle("hidden", !show);
-  if (show) setTimeout(() => $("#url").focus(), 30);
+  if (show) {
+    const inp = focusTarget === "search" ? $("#dl-search") : $("#url");
+    setTimeout(() => {
+      inp?.focus();
+      inp?.select();
+    }, 30);
+  }
 }
-$("#studio-load").addEventListener("click", () => toggleLoadMenu());
+$("#studio-load").addEventListener("click", () => toggleLoadMenu(undefined, "url"));
 $("#load-close").addEventListener("click", () => toggleLoadMenu(false));
 $("#load-menu").addEventListener("click", (e) => {
   if (e.target.id === "load-menu") toggleLoadMenu(false);   // click backdrop to close
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
-  toggleLoadMenu(false);
+  if (e.key === "Escape") {
+    toggleLoadMenu(false);
+    return;
+  }
+  // If user is already typing in an input field or modal, don't intercept
+  const tag = e.target?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const isOtherModalOpen = !$("#edit-studio")?.classList.contains("hidden") ||
+                           !$("#settings-modal")?.classList.contains("hidden");
+  if (isOtherModalOpen) return;
+
+  // Start search immediately on key press (e.g. '/' or any letter/number key)
+  if (e.key === "/" || (e.key.length === 1 && /[a-zA-Z0-9]/.test(e.key))) {
+    const m = $("#load-menu");
+    if (m && m.classList.contains("hidden")) {
+      e.preventDefault();
+      toggleLoadMenu(true, "search");
+      const inp = $("#dl-search");
+      if (inp) {
+        inp.value = e.key === "/" ? "" : e.key;
+        inp.focus();
+        inp.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+  }
 });
 
-$("#go").addEventListener("click", loadFromUrl);
-$("#url").addEventListener("keydown", (e) => { if (e.key === "Enter") loadFromUrl(); });
-$("#file").addEventListener("change", loadFromFile);
+const isLikelyUrl = (val) => {
+  const s = (val || "").trim();
+  return /^https?:\/\//i.test(s) || /^spotify:/i.test(s) || /^www\./i.test(s) || /^(youtu\.be|youtube\.com|soundcloud\.com|apple\.com)/i.test(s) || (s.includes(".") && !s.includes(" ") && s.length > 4);
+};
+
+const applySearchFilter = (e) => {
+  const val = (e?.target?.value ?? $("#dl-search")?.value ?? "").trim();
+  if (isLikelyUrl(val)) {
+    const urlInput = $("#url");
+    if (urlInput) urlInput.value = val;
+    if (e?.key === "Enter") {
+      loadFromUrl(val);
+      return;
+    }
+  }
+  DL.filter = isLikelyUrl(val) ? "" : val;
+  const clearBtn = $("#dl-search-clear");
+  if (clearBtn) clearBtn.classList.toggle("hidden", !val);
+  renderDownloads();
+};
+
+$("#dl-search")?.addEventListener("input", applySearchFilter);
+$("#dl-search")?.addEventListener("keyup", (e) => {
+  applySearchFilter(e);
+  if (e.key === "Enter" && !isLikelyUrl($("#dl-search")?.value)) {
+    const first = $("#downloads-list .dl-track");
+    if (first) first.click();
+  }
+});
+
+$("#dl-search-clear")?.addEventListener("click", () => {
+  const inp = $("#dl-search");
+  if (inp) inp.value = "";
+  DL.filter = "";
+  $("#dl-search-clear")?.classList.add("hidden");
+  renderDownloads();
+  inp?.focus();
+});
+
+$("#url-form")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  loadFromUrl();
+});
+$("#go")?.addEventListener("click", () => loadFromUrl());
+$("#url")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    loadFromUrl();
+  }
+});
+$("#file")?.addEventListener("change", loadFromFile);
 
 // ---------- progress display (playlist main screen) ----------
-const PLAYLIST_DOT_CELLS = 40;
+const LOAD_DOT_CELLS = 32;
 
-function initPlaylistDotLoader() {
-  const bar = $("#playlist-dot-loader");
+function initLoadDotLoader() {
+  const bar = $("#load-dot-loader");
   if (!bar || bar.dataset.ready) return;
   bar.innerHTML = "";
-  for (let i = 0; i < PLAYLIST_DOT_CELLS; i++) {
+  for (let i = 0; i < LOAD_DOT_CELLS; i++) {
     const cell = document.createElement("span");
     cell.className = "dot-cell";
     bar.appendChild(cell);
@@ -137,62 +228,53 @@ function initPlaylistDotLoader() {
   bar.dataset.ready = "1";
 }
 
-function setPlaylistDotPct(pct) {
-  const el = $("#playlist-progress-pct");
-  if (!el) return;
-  const n = Math.max(0, Math.min(100, Math.round(pct)));
-  const digits = String(n);
-  const v = `${digits}%`;
-  el.dataset.mask = digits.replace(/[0-9]/g, "8") + "%";
-  const inner = el.querySelector(".seg7-v");
-  if (inner) inner.textContent = v;
-}
-
-function setPlaylistDotProgress(frac) {
-  initPlaylistDotLoader();
-  const bar = $("#playlist-dot-loader");
+function setLoadDotProgress(frac) {
+  initLoadDotLoader();
+  const bar = $("#load-dot-loader");
   if (!bar) return;
   const pct = Math.max(0, Math.min(100, Math.round((frac || 0) * 100)));
   bar.setAttribute("aria-valuenow", String(pct));
   const cells = bar.querySelectorAll(".dot-cell");
   const lit = Math.round((pct / 100) * cells.length);
   cells.forEach((cell, i) => cell.classList.toggle("on", i < lit));
-  setPlaylistDotPct(pct);
+  const el = $("#load-progress-pct");
+  if (el) {
+    const digits = String(pct);
+    el.dataset.mask = digits.replace(/[0-9]/g, "8") + "%";
+    const inner = el.querySelector(".seg7-v");
+    if (inner) inner.textContent = `${digits}%`;
+  }
 }
-
-window.setStudioDotProgress = setPlaylistDotProgress;
-
-function setPlaylistBusyLed(on) {
-  $("#playlist-busy-led")?.classList.toggle("on", !!on);
-}
-window.setStudioBusyLed = setPlaylistBusyLed;
 
 function showLoading(msg) {
-  $("#playlist-progress")?.classList.remove("hidden");
-  $("#playlist-list")?.closest(".playlist-viewport")?.classList.add("hidden");
-  setPlaylistDotProgress(0);
-  $("#playlist-msg").textContent = msg || "Working…";
-  $("#playlist-msg").classList.remove("lcd-err");
-  const st = $("#playlist-load-status");
-  if (st) { st.textContent = "WORKING"; st.className = "lcd-status working"; }
-  setPlaylistBusyLed(true);
+  const box = $("#load-progress");
+  if (box) box.classList.remove("hidden");
+  setLoadDotProgress(0);
+  const msgEl = $("#load-msg");
+  if (msgEl) {
+    msgEl.textContent = msg || "Downloading…";
+    msgEl.classList.remove("lcd-err");
+  }
+  $("#playlist-busy-led")?.classList.add("on");
 }
+
 function setLoading(frac, msg) {
-  setPlaylistDotProgress(frac);
-  if (msg) $("#playlist-msg").textContent = msg;
+  setLoadDotProgress(frac);
+  const msgEl = $("#load-msg");
+  if (msgEl && msg) msgEl.textContent = msg;
 }
+
 function hideLoading() {
-  $("#playlist-progress")?.classList.add("hidden");
-  $("#playlist-list")?.closest(".playlist-viewport")?.classList.remove("hidden");
-  setPlaylistBusyLed(false);
-  const st = $("#playlist-load-status");
-  if (st) { st.textContent = "READY"; st.className = "lcd-status paused"; }
+  $("#load-progress")?.classList.add("hidden");
+  $("#playlist-busy-led")?.classList.remove("on");
 }
 
 // ---------- load flows ----------
-async function loadFromUrl() {
-  const url = $("#url").value.trim();
+async function loadFromUrl(explicitUrl) {
+  const raw = typeof explicitUrl === "string" ? explicitUrl : $("#url")?.value;
+  const url = (raw || "").trim();
   if (!url) { toast("Paste a mix or track URL first.", true); return; }
+
   if (window.AppleMusic && AppleMusic.parseUrl(url)) {
     toggleLoadMenu(false);
     if (!AppleMusic.configured()) {
@@ -200,7 +282,10 @@ async function loadFromUrl() {
       return;
     }
     const handled = await AppleMusic.openUrl(url);
-    if (handled) $("#url").value = "";
+    if (handled) {
+      if ($("#url")) $("#url").value = "";
+      if ($("#dl-search")) $("#dl-search").value = "";
+    }
     return;
   }
   if (window.Spotify && Spotify.parseUrl(url)) {
@@ -210,7 +295,10 @@ async function loadFromUrl() {
       return;
     }
     const handled = await Spotify.openUrl(url);
-    if (handled) $("#url").value = "";
+    if (handled) {
+      if ($("#url")) $("#url").value = "";
+      if ($("#dl-search")) $("#dl-search").value = "";
+    }
     return;
   }
   toggleLoadMenu(false);
@@ -220,9 +308,20 @@ async function loadFromUrl() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     });
-    $("#url").value = "";
+    if ($("#url")) $("#url").value = "";
+    if ($("#dl-search")) $("#dl-search").value = "";
+    if (job.status === "ready" || job.status === "done") {
+      hideLoading();
+      addMixToDownloads(job);
+      const title = job.source?.title || "Mix";
+      toast(`“${title}” is already in your Library.`);
+      return;
+    }
     pollJob(job.id);
-  } catch (e) { toast(e.message, true); hideLoading(); }
+  } catch (e) {
+    toast(e.message, true);
+    hideLoading();
+  }
 }
 
 async function loadFromFile(e) {
@@ -234,6 +333,13 @@ async function loadFromFile(e) {
     const fd = new FormData();
     fd.append("file", f);
     const job = await api("/api/jobs/upload", { method: "POST", body: fd });
+    if (job.status === "ready" || job.status === "done") {
+      hideLoading();
+      addMixToDownloads(job);
+      const title = job.source?.title || f.name;
+      toast(`“${title}” is already in your Library.`);
+      return;
+    }
     pollJob(job.id);
   } catch (err) { toast(err.message, true); hideLoading(); }
   finally { e.target.value = ""; }
@@ -262,20 +368,28 @@ function pollJob(jobId) {
 function addMixToDownloads(job, { silent = false } = {}) {
   const tracks = (job.result && job.result.tracks) || [];
   const mix = (job.source && job.source.title) || "Mix";
-  let added = 0;
+  const newlyAdded = [];
   tracks.forEach((t) => {
     const key = `${job.id}:${t.index}`;
     if (DL.seen.has(key)) return;
     DL.seen.add(key);
-    DL.items.push({
+    const item = {
       key, jobId: job.id, index: t.index, start: t.start, end: t.end,
       title: t.title || `Track ${t.index}`, artist: t.artist || "", mix,
-    });
-    added++;
+    };
+    DL.items.push(item);
+    newlyAdded.push(item);
   });
-  if (!silent && added) DL.open.add(job.id);   // auto-expand a freshly loaded mix
+  const added = newlyAdded.length;
+  if (!silent) DL.open.add(job.id);   // auto-expand loaded mix
   renderDownloads();
-  if (!silent && added) toast(`Downloaded ${added} track${added > 1 ? "s" : ""} from “${mix}”.`);
+  if (!silent) {
+    if (added > 0) {
+      toast(`Downloaded ${added} track${added > 1 ? "s" : ""} from “${mix}”.`);
+    } else {
+      toast(`“${mix}” is already in your Library.`);
+    }
+  }
 }
 
 /** Replace library + playlist entries for a job after the edit studio saves. */
@@ -300,13 +414,163 @@ window.syncLibraryFromJob = function (job) {
   renderPlaylist();
 };
 
+async function downloadSingleTrack(it, btn) {
+  if (!it || !it.jobId) return;
+  const origHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `⏳`;
+  }
+  toast(`Exporting “${it.title || "Track"}”…`);
+  try {
+    const res = await api(`/api/jobs/${encodeURIComponent(it.jobId)}/track`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        start: it.start,
+        end: it.end,
+        title: it.title || "",
+        artist: it.artist || "",
+        index: it.index || 1,
+      }),
+    });
+    if (res && res.filename) {
+      const a = document.createElement("a");
+      a.href = `/api/jobs/${encodeURIComponent(it.jobId)}/download/${encodeURIComponent(res.filename)}`;
+      a.download = res.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast(`Downloaded “${res.title || it.title || "Track"}”`);
+    } else {
+      toast("Download failed: invalid server response.", true);
+    }
+  } catch (err) {
+    toast(`Download failed: ${err.message || err}`, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml;
+    }
+  }
+}
+window.downloadSingleTrack = downloadSingleTrack;
+
+async function downloadMixZip(jobId, btn) {
+  if (!jobId) return;
+  const origHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `⏳`;
+  }
+  toast("Exporting mix as ZIP…");
+  try {
+    const job = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+    const tracks = (job.result?.tracks || []).map((t) => ({
+      start: t.start,
+      end: t.end,
+      title: t.title || "",
+      artist: t.artist || "",
+    }));
+    await api(`/api/jobs/${encodeURIComponent(jobId)}/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tracks }),
+    });
+    const interval = setInterval(async () => {
+      try {
+        const j = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+        if (j.status === "error") {
+          clearInterval(interval);
+          if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
+          toast(j.error || "Export failed", true);
+          return;
+        }
+        if (j.export && j.export.zip) {
+          clearInterval(interval);
+          if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
+          const a = document.createElement("a");
+          a.href = `/api/jobs/${encodeURIComponent(jobId)}/download`;
+          a.download = `${(j.source?.title || "tracks").replace(/\//g, "_")}.zip`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          toast("ZIP download started!");
+        }
+      } catch (_) {
+        clearInterval(interval);
+        if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
+      }
+    }, 1000);
+  } catch (err) {
+    toast(`Export failed: ${err.message || err}`, true);
+    if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
+  }
+}
+window.downloadMixZip = downloadMixZip;
+
 function renderDownloads() {
   const list = $("#downloads-list");
-  $("#downloads-count").textContent = `${DL.items.length} track${DL.items.length === 1 ? "" : "s"}`;
+  const countEl = $("#downloads-count");
+  const q = DL.filter.toLowerCase().trim();
+
   if (!DL.items.length) {
+    countEl.textContent = "0 tracks";
     list.innerHTML = `<div class="playlist-empty muted small">Library empty — load a URL or MP3 above.</div>`;
     return;
   }
+
+  // ── filtered flat list (search mode) ──
+  if (q) {
+    const matches = DL.items.filter((it) => {
+      const hay = `${it.title} ${it.artist} ${it.mix}`.toLowerCase();
+      return q.split(/\s+/).every((w) => hay.includes(w));
+    });
+    countEl.textContent = `${matches.length}/${DL.items.length} tracks`;
+    list.innerHTML = "";
+    if (!matches.length) {
+      list.innerHTML = `<div class="playlist-empty muted small">No tracks match "${escapeHtml(DL.filter)}".</div>`;
+      return;
+    }
+    matches.forEach((it, i) => {
+      const inPl = PL.seen.has(it.key);
+      const row = document.createElement("button");
+      row.className = "pl-row dl-track";
+      row.innerHTML = `
+        <span class="pl-prev" data-key="${escapeHtml(it.key)}" title="Preview">▶</span>
+        ${seg7(String(i + 1).padStart(2, "0"), "pl-no")}
+        <span class="pl-track">
+          <span class="pl-title">${escapeHtml(it.title)}</span>
+          <span class="pl-meta">${escapeHtml(it.artist || it.mix || "")}</span>
+        </span>
+        <span class="dl-actions-end">
+          ${seg7(fmt(it.end - it.start), "pl-len")}
+          <span class="pl-act dl-track-mp3" title="Download MP3" aria-label="Download MP3">⬇</span>
+          <span class="pl-act ${inPl ? "added" : "add"}">${inPl ? "✓" : "＋"}</span>
+          <span class="pl-act delete" title="Delete track">🗑</span>
+        </span>`;
+      row.title = inPl ? "Already in playlist" : "Add to playlist";
+      row.addEventListener("click", (e) => {
+        if (e.target.closest(".pl-prev")) { togglePreview(it); return; }
+        if (e.target.closest(".dl-track-mp3")) {
+          e.stopPropagation();
+          downloadSingleTrack(it, e.target.closest(".dl-track-mp3"));
+          return;
+        }
+        if (e.target.closest(".pl-act.delete")) { deleteFromLibrary(it); return; }
+        if (e.target.closest(".pl-act.add, .pl-act.added")) { addToPlaylist(it); return; }
+        if (isScrubbing(it)) return;
+        togglePreview(it);
+      });
+      setupPreviewScrub(row, it);
+      list.appendChild(row);
+    });
+    updatePreviewButtons();
+    return;
+  }
+
+  // ── default grouped view ──
+  countEl.textContent = `${DL.items.length} track${DL.items.length === 1 ? "" : "s"}`;
   // group tracks into one folder per mix (jobId), preserving insertion order
   const groups = new Map();
   DL.items.forEach((it) => {
@@ -327,22 +591,68 @@ function renderDownloads() {
       <span class="dl-folder-name">${escapeHtml(g.mix)}</span>
       <span class="dl-folder-count">${seg7(g.items.length)}</span>
       <span class="dl-folder-actions">
-        <button type="button" class="dl-add-all ghost iconbtn${allInPl ? " on" : ""}" title="${allInPl ? "All tracks in playlist" : "Add all tracks to playlist"}" aria-label="Add all tracks to playlist">${allInPl ? "✓" : "＋"}</button>
+        <button type="button" class="dl-reid ghost iconbtn" title="Re-identify tracks (ACRCloud / Metadata)" aria-label="Re-identify tracks">🔍</button>
+        <button type="button" class="dl-zip ghost iconbtn" title="Download mix as ZIP" aria-label="Download mix as ZIP">📦</button>
         <button type="button" class="dl-edit ghost iconbtn" title="Edit track splits" aria-label="Edit track splits">✎</button>
+        <button type="button" class="dl-add-all ghost iconbtn${allInPl ? " on" : ""}" title="${allInPl ? "All tracks in playlist" : "Add all tracks to playlist"}" aria-label="Add all tracks to playlist">${allInPl ? "✓" : "＋"}</button>
+        <button type="button" class="dl-del-mix ghost iconbtn" title="Delete mix from library and disk" aria-label="Delete mix from library">🗑</button>
       </span>`;
     folder.title = open ? "Collapse" : "Expand";
     folder.addEventListener("click", () => {
       if (DL.open.has(jobId)) DL.open.delete(jobId); else DL.open.add(jobId);
       renderDownloads();
     });
-    folder.querySelector(".dl-add-all").addEventListener("click", (e) => {
+    folder.querySelector(".dl-reid")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = "⏳";
+      toast(`Re-identifying “${g.mix}”…`);
+      try {
+        await api(`/api/jobs/${jobId}/reidentify`, { method: "POST" });
+        const poll = setInterval(async () => {
+          try {
+            const j = await api(`/api/jobs/${jobId}`);
+            if (j.status === "ready" || j.status === "done") {
+              clearInterval(poll);
+              btn.disabled = false;
+              btn.textContent = "🔍";
+              window.syncLibraryFromJob(j);
+              toast(j.message || `Re-identification complete for “${g.mix}”.`);
+            } else if (j.status === "error") {
+              clearInterval(poll);
+              btn.disabled = false;
+              btn.textContent = "🔍";
+              toast(j.error || "Re-identification failed", true);
+            }
+          } catch (_) {
+            clearInterval(poll);
+            btn.disabled = false;
+            btn.textContent = "🔍";
+          }
+        }, 1000);
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "🔍";
+        toast(`Re-identify error: ${err.message || err}`, true);
+      }
+    });
+    folder.querySelector(".dl-zip")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      downloadMixZip(jobId, e.currentTarget);
+    });
+    folder.querySelector(".dl-add-all")?.addEventListener("click", (e) => {
       e.stopPropagation();
       addMixToPlaylist(g.items, g.mix);
     });
-    folder.querySelector(".dl-edit").addEventListener("click", (e) => {
+    folder.querySelector(".dl-edit")?.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleLoadMenu(false);
       window.openEditStudio(jobId);
+    });
+    folder.querySelector(".dl-del-mix")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteMixFromLibrary(jobId, g.mix);
     });
     group.appendChild(folder);
 
@@ -356,14 +666,24 @@ function renderDownloads() {
         row.innerHTML = `
           <span class="pl-prev" data-key="${escapeHtml(it.key)}" title="Preview">▶</span>
           ${seg7(String(i + 1).padStart(2, "0"), "pl-no")}
-          <span class="pl-title">${escapeHtml(it.title)}</span>
-          <span class="pl-meta">${escapeHtml(it.artist || "")}</span>
-          ${seg7(fmt(it.end - it.start), "pl-len")}
-          <span class="pl-act ${inPl ? "added" : "add"}">${inPl ? "✓" : "＋"}</span>
-          <span class="pl-act delete" title="Delete track">🗑</span>`;
+          <span class="pl-track">
+            <span class="pl-title">${escapeHtml(it.title)}</span>
+            <span class="pl-meta">${escapeHtml(it.artist || "")}</span>
+          </span>
+          <span class="dl-actions-end">
+            ${seg7(fmt(it.end - it.start), "pl-len")}
+            <span class="pl-act dl-track-mp3" title="Download MP3" aria-label="Download MP3">⬇</span>
+            <span class="pl-act ${inPl ? "added" : "add"}">${inPl ? "✓" : "＋"}</span>
+            <span class="pl-act delete" title="Delete track">🗑</span>
+          </span>`;
         row.title = inPl ? "Already in playlist" : "Add to playlist";
         row.addEventListener("click", (e) => {
           if (e.target.closest(".pl-prev")) { togglePreview(it); return; }
+          if (e.target.closest(".dl-track-mp3")) {
+            e.stopPropagation();
+            downloadSingleTrack(it, e.target.closest(".dl-track-mp3"));
+            return;
+          }
           if (e.target.closest(".pl-act.delete")) { deleteFromLibrary(it); return; }
           if (e.target.closest(".pl-act.add, .pl-act.added")) { addToPlaylist(it); return; }
           if (isScrubbing(it)) return;
@@ -378,6 +698,26 @@ function renderDownloads() {
   });
   updatePreviewButtons();
 }
+
+async function deleteMixFromLibrary(jobId, mixTitle) {
+  const name = mixTitle || "this mix";
+  if (!window.confirm(`Delete "${name}" and all its tracks from your library and disk?`)) return;
+  try {
+    if (PL.preview && DL.items.some((it) => it.jobId === jobId && it.key === PL.preview.key)) {
+      stopPreview();
+    }
+    await api(`/api/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+    const toRemove = DL.items.filter((it) => it.jobId === jobId);
+    toRemove.forEach((it) => DL.seen.delete(it.key));
+    DL.items = DL.items.filter((it) => it.jobId !== jobId);
+    DL.open.delete(jobId);
+    renderDownloads();
+    toast(`Deleted "${name}".`);
+  } catch (e) {
+    toast(`Could not delete mix: ${e.message}`, true);
+  }
+}
+window.deleteMixFromLibrary = deleteMixFromLibrary;
 
 // ---------- playlist (ready to play) ----------
 function getFocusedDeckKey() {
@@ -402,18 +742,20 @@ function resolveLoadDeckId(deckId) {
 
 let suppressPlaylistScroll = false;
 
-/** Map playlist rows to deck slots: index 0 → deck 1, index 1 → deck 2, etc. */
+/** Map ready playlist rows to empty deck slots */
 async function autoFillPlaylistToDecks() {
   const deckIds = window.getStudioDeckIds?.() || [1, 2];
   if (!deckIds.length || !PL.items.length) return;
   suppressPlaylistScroll = true;
   try {
-    for (let i = 0; i < Math.min(PL.items.length, deckIds.length); i++) {
-      const it = PL.items[i];
+    const readyItems = PL.items.filter((it) => (window.isPlaylistTrackReady ? window.isPlaylistTrackReady(it) : it.stem?.status === "ready"));
+    if (!readyItems.length) return;
+    for (let i = 0; i < Math.min(readyItems.length, deckIds.length); i++) {
+      const it = readyItems[i];
       const deckId = deckIds[i];
       if (PL.deckKeys[deckId] === it.key) continue;
       if (PL.deckKeys[deckId] != null) continue;
-      await loadTrackToDeck(it, deckId);
+      await loadTrackToDeck(it, deckId, { silent: true });
     }
   } finally {
     suppressPlaylistScroll = false;
@@ -491,8 +833,32 @@ window.updatePlaylistStemRow = function updatePlaylistStemRow(key) {
   if (it && row) applyPlaylistStemRowUI(row, it);
 };
 
+function findPlaylistDuplicate(it) {
+  if (!it) return null;
+  if (PL.seen.has(it.key)) return PL.items.find((x) => x.key === it.key);
+  const itTitle = (it.title || "").trim().toLowerCase();
+  const itArtist = (it.artist || "").trim().toLowerCase();
+  const itMix = (it.mix || "").trim().toLowerCase();
+  if (!itTitle || itTitle.startsWith("track ")) return null;
+  return PL.items.find((x) => {
+    const xTitle = (x.title || "").trim().toLowerCase();
+    const xArtist = (x.artist || "").trim().toLowerCase();
+    const xMix = (x.mix || "").trim().toLowerCase();
+    if (xTitle === itTitle) {
+      if (xArtist && itArtist && xArtist === itArtist) return true;
+      if (xMix && itMix && xMix === itMix) return true;
+      if (!xArtist && !itArtist) return true;
+    }
+    return false;
+  });
+}
+
 function addToPlaylist(it) {
-  if (PL.seen.has(it.key)) { toast("Already in the playlist."); return; }
+  const dup = findPlaylistDuplicate(it);
+  if (dup) {
+    toast(`“${it.title}” is already in the playlist.`);
+    return;
+  }
   PL.seen.add(it.key);
   PL.items.push({ ...it, stem: createPlaylistStemState() });
   renderPlaylist();
@@ -504,8 +870,12 @@ function addToPlaylist(it) {
 
 function addMixToPlaylist(items, mixName) {
   let added = 0;
+  let dupCount = 0;
   items.forEach((it) => {
-    if (PL.seen.has(it.key)) return;
+    if (findPlaylistDuplicate(it)) {
+      dupCount++;
+      return;
+    }
     PL.seen.add(it.key);
     const entry = { ...it, stem: createPlaylistStemState() };
     PL.items.push(entry);
@@ -518,7 +888,11 @@ function addMixToPlaylist(items, mixName) {
   }
   renderPlaylist();
   renderDownloads();
-  toast(`Added ${added} track${added > 1 ? "s" : ""} from “${mixName}”.`);
+  if (dupCount > 0) {
+    toast(`Added ${added} new track${added > 1 ? "s" : ""} (${dupCount} duplicate${dupCount > 1 ? "s" : ""} skipped) from “${mixName}”.`);
+  } else {
+    toast(`Added ${added} track${added > 1 ? "s" : ""} from “${mixName}”.`);
+  }
   autoFillPlaylistToDecks();
 }
 window.addToPlaylist = addToPlaylist;
@@ -546,6 +920,15 @@ function getNextTrackForDeck(deckId) {
   if (idx < 0) return PL.items[0];
   return null;
 }
+
+function getNextTrackAfter(item) {
+  if (!item || !PL.items.length) return null;
+  const idx = PL.items.findIndex((x) => x.key === item.key || (x.jobId === item.jobId && String(x.index) === String(item.index)));
+  if (idx >= 0 && idx < PL.items.length - 1) return PL.items[idx + 1];
+  if (PL.items.length > 1) return PL.items[0];
+  return null;
+}
+window.getNextTrackAfter = getNextTrackAfter;
 
 function updateNextTrackDisplay() {
   const deckIds = window.getStudioDeckIds?.() || [];
@@ -694,7 +1077,16 @@ function scrollPlaylistToKey(key) {
   const list = $("#playlist-list");
   if (!list || !key) return;
   const row = list.querySelector(`.pl-row[data-key="${CSS.escape(key)}"]`);
-  if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  if (!row) return;
+  const rowTop = row.offsetTop;
+  const rowHeight = row.offsetHeight;
+  const listTop = list.scrollTop;
+  const listHeight = list.clientHeight;
+  if (rowTop < listTop) {
+    list.scrollTo({ top: rowTop, behavior: "smooth" });
+  } else if (rowTop + rowHeight > listTop + listHeight) {
+    list.scrollTo({ top: rowTop + rowHeight - listHeight, behavior: "smooth" });
+  }
 }
 
 function renderPlaylist() {
@@ -720,9 +1112,12 @@ function renderPlaylist() {
         <span class="pl-title">${escapeHtml(it.title)}</span>
         <span class="pl-meta">${escapeHtml(it.artist || it.mix)}</span>
       </span>
-      <span class="pl-stem-slot" aria-hidden="true"></span>
-      ${seg7(fmt(it.end - it.start), "pl-len")}
-      <span class="pl-act remove" title="Remove from playlist" aria-label="Remove from playlist">✕</span>`;
+      <span class="pl-actions-end">
+        <span class="pl-stem-slot" aria-hidden="true"></span>
+        ${seg7(fmt(it.end - it.start), "pl-len")}
+        ${it.jobId ? `<span class="pl-act pl-dl-mp3" title="Download MP3" aria-label="Download MP3">⬇</span>` : ""}
+        <span class="pl-act remove" title="Remove from playlist" aria-label="Remove from playlist">✕</span>
+      </span>`;
     row.title = isAm
       ? `${it.title} — click to preview · ＋ load to deck`
       : isSp
@@ -730,6 +1125,11 @@ function renderPlaylist() {
         : `${it.title} — click to preview · ＋ load to deck`;
     row.addEventListener("click", (e) => {
       if (e.target.closest(".load-deck")) { loadTrackToDeck(it); return; }
+      if (e.target.closest(".pl-dl-mp3")) {
+        e.stopPropagation();
+        downloadSingleTrack(it, e.target.closest(".pl-dl-mp3"));
+        return;
+      }
       if (e.target.closest(".remove")) { removeFromPlaylist(it.key); return; }
       if (isScrubbing(it)) return;
       togglePreview(it);
@@ -874,7 +1274,7 @@ function togglePreview(it) {
   updatePreviewButtons();
 }
 
-async function loadTrackToDeck(it, deckId) {
+async function loadTrackToDeck(it, deckId, { silent = false } = {}) {
   if (window.Spotify && Spotify.isItem(it)) {
     stopPreview();
     PL.activeKey = it.key;
@@ -888,6 +1288,12 @@ async function loadTrackToDeck(it, deckId) {
     renderPlaylist();
     AppleMusic.playItem(it).then(updatePreviewButtons).catch((e) => toast(e.message, true));
     toast("Apple Music playback only — load a YouTube mix or local file to split and stem.", false);
+    return;
+  }
+  if (window.isPlaylistTrackReady && !window.isPlaylistTrackReady(it)) {
+    if (!silent) {
+      toast(`“${it.title}” is still preparing stems in the playlist — ready shortly.`);
+    }
     return;
   }
   stopPreview();

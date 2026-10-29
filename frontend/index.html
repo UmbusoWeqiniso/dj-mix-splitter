@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mix Station — Stem Studio</title>
-  <link rel="stylesheet" href="/styles.css?v=195" />
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+  <link rel="stylesheet" href="/styles.css?v=198" />
 </head>
 <body>
   <div class="app">
@@ -75,10 +76,10 @@
                 <div class="load-sources">
                   <div class="load-sec">
                     <span class="load-lab">LOAD FROM URL</span>
-                    <div class="load-row">
-                      <input id="url" type="url" placeholder="YouTube, SoundCloud, Spotify, Apple Music, or audio URL…" autocomplete="off" />
-                      <button id="go" class="primary iconbtn" title="Load URL" aria-label="Load URL">⏎</button>
-                    </div>
+                    <form id="url-form" class="load-row" onsubmit="return false;">
+                      <input id="url" type="text" placeholder="YouTube, SoundCloud, Spotify, Apple Music, or audio URL…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                      <button id="go" type="submit" class="primary iconbtn" title="Load URL" aria-label="Load URL">⏎</button>
+                    </form>
                   </div>
                   <div class="load-sec">
                     <span class="load-lab">LOAD LOCAL MP3</span>
@@ -88,9 +89,20 @@
                     </label>
                   </div>
                 </div>
+                <div id="load-progress" class="load-progress hidden">
+                  <div class="dot-progress-head">
+                    <div id="load-dot-loader" class="dot-loader" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Progress"></div>
+                    <span id="load-progress-pct" class="seg7 dot-pct" data-mask="8%"><span class="seg7-v">0%</span></span>
+                  </div>
+                  <p id="load-msg" class="dotmatrix">Downloading…</p>
+                </div>
                 <div class="load-sec load-library">
                   <div class="load-lab-row">
                     <span class="load-lab">LIBRARY · ＋ ADD TO PLAYLIST</span>
+                    <div class="dl-search-box">
+                      <input id="dl-search" type="text" placeholder="🔍 Search library tracks, artists, mixes…" autocomplete="off" />
+                      <button id="dl-search-clear" type="button" class="ghost dl-search-clear hidden" title="Clear search">✕</button>
+                    </div>
                     <span id="downloads-count" class="muted small">0 tracks</span>
                   </div>
                   <div id="downloads-list" class="playlist-list dl-list">
@@ -167,6 +179,7 @@
               <p class="deck-status lcd-sub hidden" aria-live="polite"></p>
               <div class="transport">
                 <div class="transport-pads">
+                  <button type="button" class="st-cue ghost iconbtn" title="CUE / Stop (return to start / cue point)" aria-label="CUE / Stop">CUE</button>
                   <div class="play-bump">
                     <button type="button" class="st-play primary iconbtn" title="Play / pause" aria-label="Play / pause"></button>
                   </div>
@@ -273,6 +286,7 @@
         <div class="edit-bar load-modal-head">
           <span class="lcd-label">EDIT MIX SPLITS</span>
           <div class="edit-bar-actions">
+            <button id="edit-export-zip" class="ghost iconbtn" title="Download all tracks as ZIP" aria-label="Download all tracks as ZIP">📦</button>
             <button id="edit-save" class="primary iconbtn" title="Save splits to library" aria-label="Save splits">💾</button>
             <button id="edit-close" class="ghost iconbtn" title="Close" aria-label="Close">✕</button>
           </div>
@@ -305,6 +319,10 @@
               <div class="wave-wrap" id="edit-wave-wrap">
                 <canvas id="edit-wave" height="160"></canvas>
                 <div id="edit-regions" class="edit-regions"></div>
+                <div id="edit-punch-region" class="edit-punch-region hidden">
+                  <span class="edit-punch-tag in">IN</span>
+                  <span class="edit-punch-tag out">OUT</span>
+                </div>
                 <div id="edit-boundaries" class="edit-boundaries"></div>
                 <div id="edit-playhead" class="playhead"></div>
               </div>
@@ -320,12 +338,15 @@
               <button id="edit-skip-fwd" class="ghost iconbtn" title="Skip forward 10 sec" aria-label="Skip forward">⏩</button>
             </div>
             <button id="edit-split" class="ghost iconbtn" title="Split at playhead" aria-label="Split at playhead">✂</button>
+            <button id="edit-punch-open" class="ghost iconbtn" title="Stem punch — mute vocals / instruments in a range" aria-label="Stem punch">🎤</button>
             <span id="edit-time" class="lcd mono">00:00 / 00:00</span>
             <span class="edit-ctrl-sep" aria-hidden="true"></span>
             <span class="ctrl-label">SENS</span>
             <input id="edit-sensitivity" type="range" min="1" max="10" step="0.5" value="5" />
             <span id="edit-sens-val" class="lcd edit-sens-lcd">5</span>
             <button id="edit-redetect" class="ghost iconbtn" title="Re-split mix" aria-label="Re-split mix">↻</button>
+            <span class="edit-ctrl-sep" aria-hidden="true"></span>
+            <button id="edit-reidentify" class="ghost iconbtn" title="Re-identify tracks (ACRCloud / Chapters / Tracklist)" aria-label="Re-identify tracks">🔍 ID</button>
             <span id="edit-redetect-status" class="muted small edit-redetect-status"></span>
           </div>
           <div id="edit-progress" class="edit-progress hidden">
@@ -335,26 +356,125 @@
         </section>
 
         <section class="edit-module edit-tracks-sec">
-          <div class="device-screen">
-            <div class="playlist-head">
-              <span class="lcd-label">TRACK LIST</span>
-              <span id="edit-tracks-count" class="muted small">0 tracks</span>
-            </div>
-            <div class="edit-track-screen" id="edit-track-screen">
-              <div class="edit-track-hdr">
-                <span class="c-no">#</span>
-                <span class="c-time">Start</span>
-                <span class="c-len">Len</span>
-                <span class="c-title">Title</span>
-                <span class="c-artist">Artist</span>
-                <span class="c-pads"></span>
+          <div class="edit-tracks-grid">
+            <!-- Left Panel: Track List with Play Buttons and Scrub Bars -->
+            <div class="device-screen edit-tracklist-col">
+              <div class="playlist-head">
+                <span class="lcd-label">TRACK LIST</span>
+                <span id="edit-tracks-count" class="muted small">0 tracks</span>
               </div>
-              <div id="edit-track-rows" class="edit-track-body"></div>
+              <div id="edit-quota-notice" class="edit-quota-notice hidden"></div>
+              <div class="edit-track-screen" id="edit-track-screen">
+                <div class="edit-track-hdr">
+                  <span class="c-play" title="Play">▶</span>
+                  <span class="c-no">#</span>
+                  <span class="c-time">Start</span>
+                  <span class="c-len">Len</span>
+                  <span class="c-info">Title &amp; Artist</span>
+                  <span class="c-pads"></span>
+                </div>
+                <div id="edit-track-rows" class="edit-track-body"></div>
+              </div>
+            </div>
+
+            <!-- Right Panel: Selected Track Inspector & Editor -->
+            <div class="device-screen edit-inspector-col" id="edit-inspector">
+              <div class="playlist-head">
+                <span class="lcd-label">TRACK INSPECTOR</span>
+                <span id="inspect-no" class="seg7 pl-no">01</span>
+              </div>
+              <div class="inspector-body">
+                <div class="inspect-field-group">
+                  <label class="inspect-label" for="inspect-title">SONG TITLE</label>
+                  <input id="inspect-title" type="text" class="title lcd-field" placeholder="Enter song title…" autocomplete="off" />
+                </div>
+                <div class="inspect-field-group">
+                  <label class="inspect-label" for="inspect-artist">ARTIST</label>
+                  <input id="inspect-artist" type="text" class="artist lcd-field" placeholder="Enter artist name…" autocomplete="off" />
+                </div>
+                <div class="inspect-grid-2">
+                  <div class="inspect-field-group">
+                    <label class="inspect-label" for="inspect-start">START TIME</label>
+                    <div class="inspect-cue-row">
+                      <input id="inspect-start" type="text" class="start mono lcd-field" placeholder="00:00" />
+                      <button id="inspect-snap-now" type="button" class="deck-pad snap-now-btn" title="Snap start to playhead position">⏱ NOW</button>
+                    </div>
+                  </div>
+                  <div class="inspect-field-group">
+                    <label class="inspect-label">DURATION</label>
+                    <div id="inspect-len" class="inspect-lcd-val mono">--:--</div>
+                  </div>
+                </div>
+                <div class="inspect-actions">
+                  <button id="inspect-play-btn" type="button" class="deck-pad inspect-act-btn pad-play-act" title="Play / Pause selected track"><span class="deck-pad-glyph">▶</span> <span class="inspect-btn-text">PLAY</span></button>
+                  <button id="inspect-download-btn" type="button" class="deck-pad inspect-act-btn pad-dl-act" title="Download track MP3"><span class="deck-pad-glyph">⬇</span> <span class="inspect-btn-text">MP3</span></button>
+                  <button id="inspect-merge-btn" type="button" class="deck-pad inspect-act-btn pad-merge-act" title="Merge with previous track"><span class="deck-pad-glyph">⬆</span> <span class="inspect-btn-text">MERGE</span></button>
+                  <button id="inspect-delete-btn" type="button" class="deck-pad inspect-act-btn pad-del-act" title="Delete this track"><span class="deck-pad-glyph">✕</span> <span class="inspect-btn-text">DELETE</span></button>
+                </div>
+              </div>
             </div>
           </div>
         </section>
       </div>
       <audio id="edit-audio" preload="metadata"></audio>
+    </div>
+
+    <!-- Stem punch: mute stems inside an exact range and stitch back -->
+    <div id="punch-modal" class="punch-modal hidden" role="dialog" aria-label="Stem punch">
+      <div class="punch-panel">
+        <div class="punch-head">
+          <span class="lcd-label">STEM PUNCH</span>
+          <span id="punch-state" class="lcd-status paused">SET RANGE</span>
+          <button id="punch-close" type="button" class="mix-tbtn punch-x" title="Close" aria-label="Close">✕</button>
+        </div>
+
+        <div class="lcd punch-lcd">
+          <label class="punch-read">
+            <span class="punch-read-lab">IN</span>
+            <input id="punch-in" class="punch-field" spellcheck="false" autocomplete="off" title="IN time — m:ss.s (e.g. 20:00)" />
+          </label>
+          <label class="punch-read">
+            <span class="punch-read-lab">OUT</span>
+            <input id="punch-out" class="punch-field" spellcheck="false" autocomplete="off" title="OUT time — m:ss.s (e.g. 20:05)" />
+          </label>
+          <div class="punch-read">
+            <span class="punch-read-lab">LEN</span>
+            <span id="punch-len" class="punch-field punch-len">0:00.0</span>
+          </div>
+        </div>
+
+        <div class="punch-row">
+          <button id="punch-set-in" type="button" class="mix-tbtn mix-tbtn-label" title="Set IN at playhead (I)">⇤ IN</button>
+          <button id="punch-set-out" type="button" class="mix-tbtn mix-tbtn-label" title="Set OUT at playhead (O)">OUT ⇥</button>
+          <button id="punch-track" type="button" class="mix-tbtn mix-tbtn-label" title="Use the track under the playhead">TRK</button>
+          <span class="punch-sep" aria-hidden="true"></span>
+          <div class="quality-mode punch-quality" role="radiogroup" aria-label="Separation quality">
+            <button type="button" class="seg" data-q="vocal" title="Vocals + instrumental — fastest">🎤</button>
+            <button type="button" class="seg on" data-q="balanced" title="8 stems — all instruments">⚖</button>
+            <button type="button" class="seg" data-q="high" title="8 stems — max quality (slow)">💎</button>
+          </div>
+          <button id="punch-separate" type="button" class="mix-tbtn mix-tbtn-label punch-go" title="Separate stems for this exact range">SPLIT</button>
+        </div>
+
+        <div id="punch-progress" class="punch-progress hidden">
+          <div class="bar"><div id="punch-bar" class="bar-fill"></div></div>
+        </div>
+
+        <div id="punch-stems" class="punch-stems is-off">
+          <p class="punch-hint">Set IN / OUT, then press <b>SPLIT</b>.</p>
+        </div>
+
+        <div class="punch-row punch-transport">
+          <button id="punch-play-orig" type="button" class="mix-tbtn mix-tbtn-label" title="Play original (with 4s lead-in / out)">▶ ORIG</button>
+          <button id="punch-play-edit" type="button" class="mix-tbtn mix-tbtn-label" title="Play the edit (with 4s lead-in / out)" disabled>▶ EDIT</button>
+          <span class="punch-sep" aria-hidden="true"></span>
+          <button id="punch-revert" type="button" class="mix-tbtn mix-tbtn-label hidden" title="Undo all stem edits — restore original song">↺ UNDO</button>
+          <button id="punch-mp3" type="button" class="mix-tbtn mix-tbtn-label" title="Download the whole song (with edits) as MP3">⬇ MP3</button>
+          <button id="punch-apply" type="button" class="mix-tbtn mix-tbtn-label punch-apply" title="Write the edit into the song" disabled>STITCH</button>
+        </div>
+
+        <p id="punch-msg" class="punch-msg" aria-live="polite"></p>
+      </div>
     </div>
   </div>
 
@@ -408,8 +528,8 @@
   <script src="/spotify.js?v=1"></script>
   <script src="/settings.js?v=4"></script>
   <script src="/apple-music.js?v=4"></script>
-  <script src="/app.js?v=61"></script>
-  <script src="/stems.js?v=102"></script>
-  <script src="/edit.js?v=23"></script>
+  <script src="/app.js?v=62"></script>
+  <script src="/stems.js?v=104"></script>
+  <script src="/edit.js?v=26"></script>
 </body>
 </html>

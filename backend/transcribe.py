@@ -37,6 +37,12 @@ def get_model():
         return _model
 
 
+def unload_model() -> None:
+    global _model
+    with _model_lock:
+        _model = None
+
+
 def _transcribe(path: Path, on_segment=None) -> dict:
     model = get_model()
     segments, info = model.transcribe(

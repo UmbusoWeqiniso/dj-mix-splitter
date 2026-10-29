@@ -35,6 +35,7 @@ def download_audio(url: str, out_dir: Path, on_progress: ProgressCb = None) -> d
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "socket_timeout": 30,
         "progress_hooks": [_hook],
         "postprocessors": [
             {
@@ -42,6 +43,11 @@ def download_audio(url: str, out_dir: Path, on_progress: ProgressCb = None) -> d
                 "preferredcodec": "wav",
             }
         ],
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -61,4 +67,7 @@ def download_audio(url: str, out_dir: Path, on_progress: ProgressCb = None) -> d
         "uploader": info.get("uploader") or "",
         "webpage_url": info.get("webpage_url") or url,
         "description": info.get("description") or "",
+        "chapters": info.get("chapters") or [],
+        "artist": info.get("artist") or "",
+        "track": info.get("track") or "",
     }
